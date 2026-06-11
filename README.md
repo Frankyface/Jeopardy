@@ -7,6 +7,8 @@ answers live in a single JSON file you can edit.
 ## Features
 
 - **JSON-driven** — edit [questions.json](questions.json) to make your own game
+- **Built-in question editor** — build a board right in the page and download it
+  as `questions.json`, no hand-editing required
 - **Players & scoring** — add up to 8 players, award or deduct points per clue,
   click any score to fix it manually
 - **Daily Doubles** — mark any clue with `"dailyDouble": true` for a wager round
@@ -36,6 +38,27 @@ answers live in a single JSON file you can edit.
    `https://YOUR-USERNAME.github.io/YOUR-REPO/`.
 
 ## Customizing the questions
+
+### The easy way: the built-in editor
+
+Click **Question Editor** (top right, or from the start screen). It opens
+prefilled with whatever game is currently loaded. From there you can:
+
+- rename the game and categories, edit clues, answers, and values
+- add or remove categories (up to 8) and clues (up to 8 per category)
+- tick **DD** on any clue to make it a Daily Double
+- toggle Final Jeopardy on or off
+
+Your draft auto-saves in the browser as you type, so it survives a refresh.
+When you're done:
+
+- **Download JSON** validates the draft and saves it as `questions.json` —
+  commit it to the repo (replacing the existing file) to make it the default
+  game for everyone.
+- **Use in game** loads it into the current session immediately, no download
+  needed.
+
+### The manual way: edit the JSON
 
 Edit `questions.json`. The shape is:
 
@@ -112,6 +135,7 @@ still play Final Jeopardy (with a $0 wager).
 index.html        page structure
 css/styles.css    all styling
 js/app.js         game logic (vanilla JS, no dependencies)
+js/editor.js      in-page question editor
 js/data.js        built-in sample game (offline fallback)
 questions.json    the questions GitHub Pages serves — edit this one
 ```

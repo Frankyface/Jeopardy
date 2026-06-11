@@ -16,6 +16,7 @@
     <h1 id="game-title" class="topbar-title">Jeopardy</h1>
     <div class="topbar-actions">
       <button id="btn-final" class="btn btn-gold hidden" type="button">Final Jeopardy</button>
+      <button id="btn-editor" class="btn btn-ghost" type="button">Question Editor</button>
       <button id="btn-new-game" class="btn btn-ghost hidden" type="button">New Game</button>
     </div>
   </header>
@@ -43,6 +44,7 @@
           <h3 class="setup-heading">Questions</h3>
           <div class="setup-load">
             <button id="btn-load-json" class="btn btn-ghost" type="button">Load custom questions (.json)</button>
+            <button id="btn-editor-setup" class="btn btn-ghost" type="button">Open question editor</button>
             <input type="file" id="json-file-input" accept=".json,application/json" hidden>
           </div>
         </div>
@@ -64,6 +66,59 @@
       <div id="scoreboard" class="scoreboard" aria-label="Scores" aria-live="polite"></div>
     </section>
   </main>
+
+  <!-- ===== Question editor ===== -->
+  <section id="screen-editor" class="editor hidden" aria-label="Question editor">
+    <div class="editor-inner">
+      <div class="editor-head">
+        <h2 class="editor-title">Question Editor</h2>
+        <div class="editor-head-actions">
+          <button id="btn-editor-download" class="btn btn-gold" type="button">Download JSON</button>
+          <button id="btn-editor-use" class="btn btn-gold" type="button">Use in game</button>
+          <button id="btn-editor-close" class="btn btn-ghost" type="button">Close</button>
+        </div>
+      </div>
+      <p class="editor-hint">
+        Build your own board, then <strong>Download JSON</strong> to get a
+        <code>questions.json</code> you can commit to the repo, or
+        <strong>Use in game</strong> to play it right away. Your draft auto-saves
+        in this browser.
+      </p>
+
+      <label class="editor-field editor-game-title">Game title
+        <input id="editor-title" type="text" maxlength="80" autocomplete="off">
+      </label>
+
+      <div id="editor-categories"></div>
+
+      <div class="editor-row-actions">
+        <button id="btn-add-category" class="btn btn-ghost" type="button">+ Add category</button>
+        <button id="btn-editor-reset" class="btn btn-ghost" type="button">Reset to loaded game</button>
+        <button id="btn-editor-blank" class="btn btn-ghost" type="button">Start blank</button>
+      </div>
+
+      <fieldset class="editor-final">
+        <legend>
+          <label class="editor-check">
+            <input type="checkbox" id="editor-final-enabled"> Include Final Jeopardy
+          </label>
+        </legend>
+        <div id="editor-final-fields" class="editor-final-fields">
+          <label class="editor-field">Category
+            <input id="editor-final-category" type="text" autocomplete="off">
+          </label>
+          <label class="editor-field">Clue
+            <textarea id="editor-final-clue" rows="2"></textarea>
+          </label>
+          <label class="editor-field">Answer
+            <input id="editor-final-answer" type="text" autocomplete="off">
+          </label>
+        </div>
+      </fieldset>
+
+      <p id="editor-error" class="error-msg" role="alert"></p>
+    </div>
+  </section>
 
   <!-- ===== Clue modal ===== -->
   <div id="clue-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="clue-category">
@@ -109,5 +164,6 @@
 
   <script src="js/data.js"></script>
   <script src="js/app.js"></script>
+  <script src="js/editor.js"></script>
 </body>
 </html>

@@ -720,6 +720,216 @@ body {
 
 .standings-list .standings-score.negative { color: var(--red); }
 
+/* ============ Question editor ============ */
+
+.editor {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  overflow-y: auto;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #0a1158 0%, var(--blue-deep) 45%, var(--blue-night) 100%);
+  padding: 1.4rem 1.2rem 3rem;
+}
+
+body.editor-open { overflow: hidden; }
+
+.editor-inner {
+  max-width: 1080px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.editor-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(1.5rem, 1.2rem + 1.5vw, 2.2rem);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--gold-text);
+  margin: 0;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.55);
+}
+
+.editor-head-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+
+.editor-hint {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 0.92rem;
+  max-width: 72ch;
+}
+
+.editor-hint code {
+  background: rgba(1, 1, 23, 0.6);
+  border-radius: 5px;
+  padding: 0.1em 0.4em;
+}
+
+.editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim);
+}
+
+.editor-field input,
+.editor-field textarea,
+.editor-clue-row input,
+.editor-clue-row textarea {
+  font: inherit;
+  font-weight: 400;
+  font-size: 0.95rem;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--ink);
+  background: rgba(1, 1, 23, 0.6);
+  border: 1px solid rgba(170, 176, 224, 0.35);
+  border-radius: 8px;
+  padding: 0.5em 0.7em;
+  resize: vertical;
+}
+
+.editor-field input:focus-visible,
+.editor-field textarea:focus-visible,
+.editor-clue-row input:focus-visible,
+.editor-clue-row textarea:focus-visible {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 204, 77, 0.25);
+}
+
+.editor-game-title { max-width: 420px; }
+
+.editor-cat {
+  background: linear-gradient(180deg, rgba(20, 28, 96, 0.75), rgba(8, 12, 52, 0.9));
+  border: 1px solid rgba(170, 176, 224, 0.25);
+  border-radius: 14px;
+  padding: 1.1rem 1.2rem 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.editor-cat-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.editor-cat-name { flex: 1; min-width: 220px; max-width: 420px; }
+
+.btn-small { font-size: 0.82rem; padding: 0.45em 0.9em; }
+
+.editor-clues { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.editor-clue-row {
+  display: grid;
+  grid-template-columns: 88px 1fr 1fr 34px 34px;
+  gap: 0.55rem;
+  align-items: start;
+}
+
+.editor-clue-labels {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim);
+}
+
+.editor-clue-row .editor-dd {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: 0.6rem;
+  justify-self: center;
+  accent-color: var(--gold);
+}
+
+.editor-clue-row .remove-btn {
+  background: transparent;
+  color: var(--ink-dim);
+  border: none;
+  font-size: 1rem;
+  padding: 0.45em;
+  margin-top: 0.25rem;
+  border-radius: 6px;
+  cursor: pointer;
+  justify-self: center;
+}
+
+.editor-clue-row .remove-btn:hover:not(:disabled) {
+  color: var(--red);
+  background: rgba(255, 107, 107, 0.12);
+}
+
+.editor-clue-row .remove-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.editor-clue-row .remove-btn:focus-visible { outline: 2px solid var(--gold); }
+
+.editor-row-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+
+.editor-final {
+  border: 1px solid rgba(170, 176, 224, 0.25);
+  border-radius: 14px;
+  padding: 1rem 1.2rem 1.2rem;
+  margin: 0;
+}
+
+.editor-final legend { padding: 0 0.5em; }
+
+.editor-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.editor-check input {
+  width: 1.15rem;
+  height: 1.15rem;
+  accent-color: var(--gold);
+}
+
+.editor-final-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  margin-top: 0.6rem;
+}
+
+@media (max-width: 760px) {
+  .editor-clue-row {
+    grid-template-columns: 88px 1fr 42px;
+    grid-template-areas:
+      "value clue   dd"
+      "value answer remove";
+  }
+  .editor-clue-row input[type="number"] { grid-area: value; }
+  .editor-clue-row textarea:nth-of-type(1) { grid-area: clue; }
+  .editor-clue-row textarea:nth-of-type(2) { grid-area: answer; }
+  .editor-clue-row .editor-dd { grid-area: dd; }
+  .editor-clue-row .remove-btn { grid-area: remove; }
+  .editor-clue-labels { display: none; }
+}
+
 /* ============ Responsive & motion ============ */
 
 @media (max-width: 600px) {
