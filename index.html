@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jeopardy</title>
+  <meta name="description" content="A customizable Jeopardy game board. Load your own questions from JSON, add players, and keep score.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+  <header class="topbar">
+    <h1 id="game-title" class="topbar-title">Jeopardy</h1>
+    <div class="topbar-actions">
+      <button id="btn-final" class="btn btn-gold hidden" type="button">Final Jeopardy</button>
+      <button id="btn-new-game" class="btn btn-ghost hidden" type="button">New Game</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===== Setup screen ===== -->
+    <section id="screen-setup" class="screen screen-setup">
+      <div class="setup-card">
+        <p class="setup-kicker">This is&hellip;</p>
+        <h2 id="setup-title" class="setup-title">Jeopardy!</h2>
+        <p id="source-note" class="source-note"></p>
+
+        <div class="setup-section">
+          <h3 class="setup-heading">Players</h3>
+          <ul id="player-list" class="player-list"></ul>
+          <form id="add-player-form" class="add-player-form">
+            <label class="visually-hidden" for="player-name-input">Player name</label>
+            <input id="player-name-input" type="text" maxlength="24" placeholder="Player name"
+                   autocomplete="off" spellcheck="false">
+            <button class="btn btn-ghost" type="submit">+ Add player</button>
+          </form>
+        </div>
+
+        <div class="setup-section">
+          <h3 class="setup-heading">Questions</h3>
+          <div class="setup-load">
+            <button id="btn-load-json" class="btn btn-ghost" type="button">Load custom questions (.json)</button>
+            <input type="file" id="json-file-input" accept=".json,application/json" hidden>
+          </div>
+        </div>
+
+        <p id="setup-error" class="error-msg" role="alert"></p>
+        <button id="btn-start" class="btn btn-gold btn-big" type="button">Start Game</button>
+      </div>
+    </section>
+
+    <!-- ===== Board screen ===== -->
+    <section id="screen-board" class="screen hidden">
+      <div class="board-wrap">
+        <div id="board" class="board" role="grid" aria-label="Jeopardy board"></div>
+      </div>
+      <div id="board-done-banner" class="board-done hidden">
+        <p>That&rsquo;s the board!</p>
+        <button id="btn-board-done" class="btn btn-gold btn-big" type="button"></button>
+      </div>
+      <div id="scoreboard" class="scoreboard" aria-label="Scores" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <!-- ===== Clue modal ===== -->
+  <div id="clue-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="clue-category">
+    <div class="modal-card clue-card">
+      <div class="clue-header">
+        <span id="clue-category" class="clue-cat"></span>
+        <span id="clue-value" class="clue-val"></span>
+      </div>
+
+      <div id="dd-splash" class="dd-splash hidden">
+        <p class="dd-title">Daily Double!</p>
+        <div class="dd-form">
+          <label class="dd-field">Who&rsquo;s answering?
+            <select id="dd-player"></select>
+          </label>
+          <label class="dd-field">Wager
+            <input id="dd-wager" type="number" min="5" step="5" inputmode="numeric">
+          </label>
+          <p id="dd-max-note" class="dd-note"></p>
+          <p id="dd-error" class="error-msg" role="alert"></p>
+          <button id="btn-dd-go" class="btn btn-gold" type="button">Reveal Clue</button>
+        </div>
+      </div>
+
+      <p id="clue-text" class="clue-text hidden"></p>
+      <p id="answer-text" class="answer-text hidden"></p>
+
+      <div class="clue-actions">
+        <button id="btn-reveal" class="btn btn-gold btn-big hidden" type="button">Reveal Answer</button>
+        <div id="judge-row" class="judge-row hidden"></div>
+        <button id="btn-skip" class="btn btn-ghost hidden" type="button">No one got it &mdash; close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Final Jeopardy / standings modal ===== -->
+  <div id="final-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="final-heading">
+    <div class="modal-card final-card">
+      <h2 id="final-heading" class="final-heading"></h2>
+      <div id="final-body" class="final-body"></div>
+    </div>
+  </div>
+
+  <script src="js/data.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
