@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Buzzer loopback harness (I1)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #04062b; color: #f4f5ff; margin: 0; padding: 2rem; }
+    h1 { font-size: 1.2rem; }
+    #summary { font-weight: 700; margin: 0.6rem 0 1rem; }
+    #summary.ok { color: #51d88a; }
+    #summary.bad { color: #ff6b6b; }
+    #results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+    #results li { padding: 0.4rem 0.7rem; border-radius: 8px; background: rgba(255,255,255,0.05); }
+    #results li[data-pass="true"] { border-left: 4px solid #51d88a; }
+    #results li[data-pass="false"] { border-left: 4px solid #ff6b6b; background: rgba(255,107,107,0.12); }
+    .tag { font-weight: 700; margin-right: 0.5rem; }
+    li[data-pass="true"] .tag { color: #51d88a; }
+    li[data-pass="false"] .tag { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <h1>Buzzer loopback harness — scenarios I1 + I2</h1>
+  <p id="summary">Running…</p>
+  <ul id="results"></ul>
+
+  <!-- Pure core -->
+  <script src="../js/buzzer-protocol.js"></script>
+
+  <!-- Minimal app-global shims so the real host glue can run headless.
+       Defined BEFORE buzzer-host.js so its boot() finds them. No buzzer
+       DOM containers are present, so the host's render* calls no-op. -->
+  <script>
+    window.MAX_PLAYERS = 8;
+    window.state = { phase: "board", players: [], active: null, buzzer: { roomCode: null } };
+    window.setState = (patch) => { window.state = Object.assign({}, window.state, patch); };
+    window.$ = (id) => document.getElementById(id);
+    window.el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    };
+    window.show = (node, visible) => { if (node) node.classList.toggle("hidden", !visible); };
+
+    /* ---- extra app-global shims for the I2 wager/answer flow (§8) ---- */
+    window.maxBoardValue = () => 1000;
+    window.dailyDoubleMaxWager = (playerId) => {
+      const p = window.state.players.find((x) => x.id === playerId);
+      return Math.max(p ? p.score : 0, window.maxBoardValue());
+    };
+    window.finalMaxWager = (player) => Math.max(player ? player.score : 0, 0);
+    window.lockDailyDoubleWager = () => {
+      const pid = document.getElementById("dd-player").value;
+      const wager = parseInt(document.getElementById("dd-wager").value, 10);
+      window.setState({
+        active: Object.assign({}, window.state.active, { wagerLocked: true, wager, wagerPlayerId: pid }),
+      });
+    };
+    // Minimal DD DOM so the wagers glue can attach a change listener and the
+    // lock shim can read the filled-in fields.
+    (function () {
+      const add = (tag, id) => { const n = document.createElement(tag); n.id = id; document.body.appendChild(n); };
+      add("select", "dd-player");
+      add("input", "dd-wager");
+      add("div", "dd-splash");
+    })();
+  </script>
+
+  <!-- Real host glue under test -->
+  <script src="../js/buzzer-host.js"></script>
+  <script src="../js/buzzer-wagers.js"></script>
+
+  <!-- In-page fake transport + scripted scenario -->
+  <script>
+    (function () {
+      "use strict";
+      const BP = window.BuzzerProtocol;
+      const results = [];
+      let uncaught = null;
+      let p2 = null; // shared across I1 → I2 (Bo stays connected)
+      window.addEventListener("error", (e) => { uncaught = e.message; });
+
+      function check(label, cond) { results.push({ label, pass: !!cond }); }
+      const tick = () => new Promise((r) => setTimeout(r, 0));
+
+      /* ---- fake DataConnection / Peer ---- */
+      function FakeConn(remotePeerId) {
+        this.peer = remotePeerId;
+        this.open = true;
+        this._handlers = {};
+        this._other = null;
+      }
+      FakeConn.prototype.on = function (ev, cb) {
+        (this._handlers[ev] = this._handlers[ev] || []).push(cb);
+      };
+      FakeConn.prototype.emit = function (ev, arg) {
+        (this._handlers[ev] || []).forEach((cb) => cb(arg));
+      };
+      FakeConn.prototype.send = function (msg) {
+        if (this._other) this._other.emit("data", msg);
+      };
+      FakeConn.prototype.close = function () {
+        this.open = false;
+        if (this._other) { this._other.open = false; this._other.emit("close"); }
+        this.emit("close");
+      };
+
+      let hostPeer = null;
+      function FakePeer(id) {
+        this.id = id;
+        this.destroyed = false;
+        this._handlers = {};
+        queueMicrotask(() => { if (!this.destroyed) this.emit("open", this.id); });
+      }
+      FakePeer.prototype.on = function (ev, cb) {
+        (this._handlers[ev] = this._handlers[ev] || []).push(cb);
+      };
+      FakePeer.prototype.emit = function (ev, arg) {
+        (this._handlers[ev] || []).forEach((cb) => cb(arg));
+      };
+      FakePeer.prototype.destroy = function () { this.destroyed = true; };
+
+      function makePlayer(name, idx) {
+        const hostConn = new FakeConn("player-" + idx);
+        const playerConn = new FakeConn(hostPeer.id);
+        hostConn._other = playerConn;
+        playerConn._other = hostConn;
+        const player = { name, peerId: "player-" + idx, conn: playerConn, ui: BP.createPlayerUiState() };
+        playerConn.on("data", (msg) => { player.ui = BP.playerReduce(player.ui, msg); });
+        hostPeer.emit("connection", hostConn);      // host sees the incoming connection
+        playerConn.send({ v: 1, t: "join", name }); // player announces itself
+        return player;
+      }
+
+      function scoreId(name) {
+        const p = window.state.players.find((x) => x.name === name);
+        return p ? p.id : null;
+      }
+
+      /* ---- scenario I1 ---- */
+      async function run() {
+        BuzzerHost._init({ createPeer: (id) => (hostPeer = new FakePeer(id)) });
+        BuzzerHost.openRoom();
+        await tick();
+        check("room opens (status = open)", BuzzerHost.status() === "open");
+        BuzzerHost.toggleSound(); // silence the host beep for a clean headless run
+
+        // Two players join.
+        const p1 = makePlayer("Ann", 1);
+        p2 = makePlayer("Bo", 2);
+        check("P1 lands on buzzer screen, idle", p1.ui.screen === "buzzer" && p1.ui.mode === "idle");
+        check("P2 lands on buzzer screen, idle", p2.ui.screen === "buzzer" && p2.ui.mode === "idle");
+        check("scoreboard gained 2 players", window.state.players.length === 2);
+        check("host reports 2 connected", BuzzerHost.connectedCount() === 2);
+
+        // Arm.
+        BuzzerHost.arm();
+        check("P1 armed", p1.ui.mode === "armed");
+        check("P2 armed", p2.ui.mode === "armed");
+
+        // P1 buzzes first.
+        p1.conn.send({ v: 1, t: "buzz" });
+        check("P1 won the buzz", p1.ui.mode === "won");
+        check("P2 shows taken by Ann", p2.ui.mode === "taken" && p2.ui.by === "Ann");
+
+        // A late second buzz from P2 must be ignored (P1 stays won).
+        p2.conn.send({ v: 1, t: "buzz" });
+        check("second buzz ignored (P1 still won)", p1.ui.mode === "won" && p2.ui.mode === "taken");
+
+        // Host judges P1 wrong -> P1 locked, P2 re-armed.
+        BuzzerHost.onJudgedWrong(scoreId("Ann"));
+        check("P1 locked out", p1.ui.mode === "locked");
+        check("P2 re-armed", p2.ui.mode === "armed");
+
+        // P2 buzzes and wins; P1 stays locked.
+        p2.conn.send({ v: 1, t: "buzz" });
+        check("P2 won the buzz", p2.ui.mode === "won");
+        check("P1 still locked", p1.ui.mode === "locked");
+
+        // Clue closes -> everyone idle.
+        BuzzerHost.onClueClosed();
+        check("P1 back to idle", p1.ui.mode === "idle");
+        check("P2 back to idle", p2.ui.mode === "idle");
+
+        // P1 leaves.
+        p1.conn.close();
+        check("host reports 1 connected after P1 leaves", BuzzerHost.connectedCount() === 1);
+        check("P1 removed from room state", !BuzzerHost._roomState().players["player-1"]);
+
+        // ---- E10 / R6: Spacebar arm hotkey (P2 is still connected) ----
+        const fireSpace = (target) => {
+          const ev = new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, cancelable: true });
+          (target || document).dispatchEvent(ev);
+          return ev;
+        };
+
+        // R6: no active clue -> the hotkey must not touch Space.
+        window.state = Object.assign({}, window.state, { active: null });
+        let ev = fireSpace();
+        check("R6 Space untouched with no clue", ev.defaultPrevented === false && p2.ui.mode === "idle");
+
+        // Make the buzz bar live, then arm with Space.
+        window.state = Object.assign({}, window.state, { active: { isDailyDouble: false, revealed: false } });
+        ev = fireSpace();
+        check("E10 Space arms P2", p2.ui.mode === "armed");
+        check("E10 Space intercepted (preventDefault)", ev.defaultPrevented === true);
+
+        // Space typed into a text input must not toggle and must not be intercepted.
+        const input = document.createElement("input");
+        document.body.appendChild(input);
+        ev = fireSpace(input);
+        check("E10 Space in input does not toggle", p2.ui.mode === "armed");
+        check("E10 Space in input not intercepted", ev.defaultPrevented === false);
+        input.remove();
+
+        // After the ~300 ms debounce, Space disarms.
+        await new Promise((r) => setTimeout(r, 360));
+        fireSpace();
+        check("E10 Space after debounce disarms P2", p2.ui.mode === "idle");
+
+        check("no uncaught errors during scenario", uncaught === null);
+      }
+
+      /* ---- scenario I2 — phone DD wager + full phone Final ---- */
+      function populateDdOptions() {
+        const sel = document.getElementById("dd-player");
+        sel.replaceChildren();
+        window.state.players.forEach((p) => {
+          const o = document.createElement("option");
+          o.value = p.id;
+          o.textContent = p.name;
+          sel.appendChild(o);
+        });
+      }
+
+      function judgeFinalSim(name, delta, correct) {
+        const pid = scoreId(name);
+        // Mirror app.js judgeFinal: store the verdict as a string ("correct"/
+        // "wrong") so the result push reads it directly instead of inferring it
+        // from the score delta (which is 0 for a $0 wager — the bug under test).
+        window.state = Object.assign({}, window.state, {
+          players: window.state.players.map((p) =>
+            p.id === pid ? Object.assign({}, p, { score: p.score + delta }) : p),
+          final: Object.assign({}, window.state.final, {
+            judged: Object.assign({}, window.state.final.judged, { [pid]: correct ? "correct" : "wrong" }),
+          }),
+        });
+      }
+
+      async function runI2() {
+        // Give the room a game (Daily Double + Final) and a second phone.
+        window.state = Object.assign({}, window.state, {
+          game: {
+            categories: [{ name: "Science", clues: [{ value: 400, clue: "c", answer: "a" }] }],
+            finalJeopardy: { category: "History", clue: "It fell in 476 AD.", answer: "What is Rome?" },
+          },
+        });
+        const p3 = makePlayer("Cy", 3);
+        check("I2 P3 joined for the final", p3.ui.screen === "buzzer" && BuzzerHost.connectedCount() === 2);
+
+        // --- Daily Double round-trip (E11) ---
+        const bo = scoreId("Bo");
+        populateDdOptions();
+        window.state = Object.assign({}, window.state, {
+          active: { isDailyDouble: true, wagerLocked: false, cat: 0, row: 0 },
+        });
+        BuzzerWagers._promptDd(bo);
+        check("I2 DD prompt reaches P2 with bounds", p2.ui.screen === "dd-wager" && p2.ui.prompt.max === 1000 && p2.ui.prompt.min === 5);
+
+        p2.conn.send({ v: 1, t: "dd-wager", amount: 5000 }); // out of bounds
+        check("I2 DD out-of-bounds -> input-rejected on form", p2.ui.screen === "dd-wager" && !!p2.ui.notice);
+        check("I2 DD not locked after bad wager", window.state.active.wagerLocked === false);
+
+        p2.conn.send({ v: 1, t: "dd-wager", amount: 600 }); // valid
+        check("I2 DD valid wager locks host", window.state.active.wagerLocked === true && window.state.active.wager === 600);
+        check("I2 DD phone accepted -> buzzer + beat", p2.ui.screen === "buzzer" && !!p2.ui.notice);
+
+        // --- Full phone Final (E13–E15) ---
+        window.state = Object.assign({}, window.state, {
+          active: null,
+          players: window.state.players.map((p) =>
+            p.name === "Bo" ? Object.assign({}, p, { score: 1000 })
+              : p.name === "Cy" ? Object.assign({}, p, { score: 800 }) : p),
+          final: { stage: "wager", wagers: {}, answers: {}, judged: {} },
+        });
+        BuzzerHost.onRender();
+        check("I2 final wager prompts both phones", p2.ui.screen === "final-wager" && p3.ui.screen === "final-wager");
+        check("I2 final wager max is per-player", p2.ui.prompt.max === 1000 && p3.ui.prompt.max === 800);
+
+        // A third phone sitting on $0: their ONLY legal Final wager is $0. This is
+        // the regression guard for the delta-inferred-verdict bug — a $0 wager
+        // judged ✗ produces a 0 delta and must still read WRONG on the phone.
+        const p4 = makePlayer("Di", 4);
+        const di = scoreId("Di");
+        check("I2 P4 ($0 score) prompted with max 0", p4.ui.screen === "final-wager" && p4.ui.prompt.max === 0);
+
+        p2.conn.send({ v: 1, t: "final-wager", amount: 600 });
+        p3.conn.send({ v: 1, t: "final-wager", amount: 800 });
+        p4.conn.send({ v: 1, t: "final-wager", amount: 0 });
+        check("I2 final wagers landed in state.final.wagers", window.state.final.wagers[bo] === 600 && window.state.final.wagers[scoreId("Cy")] === 800 && window.state.final.wagers[di] === 0);
+
+        // Host locks wagers -> answer stage.
+        window.state = Object.assign({}, window.state, { final: Object.assign({}, window.state.final, { stage: "clue" }) });
+        BuzzerHost.onRender();
+        check("I2 answer stage reaches phones with clue", p2.ui.screen === "final-answer" && p2.ui.prompt.clue.length > 0);
+
+        p2.conn.send({ v: 1, t: "final-answer", text: "who is rome" });
+        p3.conn.send({ v: 1, t: "final-answer", text: "who is greece" });
+        p2.conn.send({ v: 1, t: "final-answer", text: "what is rome" }); // resubmit overwrites
+        check("I2 answers landed + resubmit overwrote (last wins)", window.state.final.answers[bo] === "what is rome" && window.state.final.answers[scoreId("Cy")] === "who is greece");
+
+        // Host reveals -> judge stage (phones wait).
+        window.state = Object.assign({}, window.state, { final: Object.assign({}, window.state.final, { stage: "judge" }) });
+        BuzzerHost.onRender();
+        check("I2 judge stage -> phones waiting", p2.ui.screen === "final-waiting" && p3.ui.screen === "final-waiting");
+
+        // Host rules ✓ Bo (+600 -> 1600), ✗ Cy (-800 -> 0); results pushed.
+        judgeFinalSim("Bo", 600, true);
+        BuzzerHost.onRender();
+        check("I2 Bo result: correct +600 -> 1600", p2.ui.screen === "final-result" && p2.ui.result.correct === true && p2.ui.result.delta === 600 && p2.ui.result.score === 1600);
+        judgeFinalSim("Cy", -800, false);
+        BuzzerHost.onRender();
+        check("I2 Cy result: wrong -800 -> 0", p3.ui.result.correct === false && p3.ui.result.delta === -800 && p3.ui.result.score === 0);
+
+        // $0-wager ✗: delta is 0, so it CANNOT be inferred — the phone must still
+        // show WRONG. Fails before the verdict-string fix; passes after it.
+        judgeFinalSim("Di", 0, false);
+        BuzzerHost.onRender();
+        check("I2 $0-wager wrong -> phone shows WRONG (not Correct!)", p4.ui.screen === "final-result" && p4.ui.result.correct === false && p4.ui.result.delta === 0 && p4.ui.result.score === 0);
+
+        // Cancel path (back to board) -> phones return to buzzer/idle.
+        window.state = Object.assign({}, window.state, { final: null });
+        BuzzerHost.onRender();
+        check("I2 cancel returns phones to buzzer", p2.ui.screen === "buzzer" && p3.ui.screen === "buzzer");
+
+        check("I2 no uncaught errors during scenario", uncaught === null);
+      }
+
+      function renderResults() {
+        const list = document.getElementById("results");
+        let passed = 0;
+        results.forEach((r) => {
+          if (r.pass) passed += 1;
+          const li = document.createElement("li");
+          li.setAttribute("data-pass", r.pass ? "true" : "false");
+          const tag = document.createElement("span");
+          tag.className = "tag";
+          tag.textContent = r.pass ? "PASS" : "FAIL";
+          li.appendChild(tag);
+          li.appendChild(document.createTextNode(r.label));
+          list.appendChild(li);
+        });
+        const summary = document.getElementById("summary");
+        const ok = passed === results.length && results.length > 0;
+        summary.textContent = `${passed}/${results.length} checks passed`;
+        summary.className = ok ? "ok" : "bad";
+      }
+
+      // Run only after full load so buzzer-host's DOMContentLoaded boot has wired
+      // its Space keydown listener before the E10/R6 hotkey fires are dispatched.
+      const start = () =>
+        run()
+          .then(runI2)
+          .catch((err) => { check("scenario ran without throwing: " + err.message, false); })
+          .finally(renderResults);
+      if (document.readyState === "complete") start();
+      else window.addEventListener("load", start);
+    })();
+  </script>
+</body>
+</html>

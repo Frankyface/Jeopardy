@@ -9,17 +9,22 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/buzzer.css">
 </head>
 <body>
 
   <header class="topbar">
     <h1 id="game-title" class="topbar-title">Jeopardy</h1>
     <div class="topbar-actions">
+      <button id="buzzer-chip" class="buzzer-chip hidden" type="button" aria-haspopup="true"></button>
       <button id="btn-final" class="btn btn-gold hidden" type="button">Final Jeopardy</button>
       <button id="btn-editor" class="btn btn-ghost" type="button">Question Editor</button>
       <button id="btn-new-game" class="btn btn-ghost hidden" type="button">New Game</button>
     </div>
   </header>
+
+  <!-- Host buzzer-room popover (board screen); filled by buzzer-host.js -->
+  <div id="buzzer-popover" class="buzzer-popover hidden" role="dialog" aria-label="Buzzer room"></div>
 
   <main>
     <!-- ===== Setup screen ===== -->
@@ -38,6 +43,8 @@
                    autocomplete="off" spellcheck="false">
             <button class="btn btn-ghost" type="submit">+ Add player</button>
           </form>
+          <!-- Optional phone-buzzer room; rendered by buzzer-host.js -->
+          <div id="buzzer-setup" class="buzzer-setup"></div>
         </div>
 
         <div class="setup-section">
@@ -146,6 +153,9 @@
       <p id="clue-text" class="clue-text hidden"></p>
       <p id="answer-text" class="answer-text hidden"></p>
 
+      <!-- Host buzz bar (regular clues only); filled by buzzer-host.js -->
+      <div id="buzzer-clue-bar" class="buzzer-clue-bar hidden"></div>
+
       <div class="clue-actions">
         <button id="btn-reveal" class="btn btn-gold btn-big hidden" type="button">Reveal Answer</button>
         <div id="judge-row" class="judge-row hidden"></div>
@@ -162,8 +172,69 @@
     </div>
   </div>
 
+  <!-- ===== Player mode (phone buzzer) — shown only when ?room=CODE ===== -->
+  <section id="screen-player" class="screen-player hidden" aria-label="Buzzer room">
+    <div id="player-join" class="player-join">
+      <h2 class="player-join-title">Buzz In</h2>
+      <label class="player-field" for="player-code">Room code
+        <input id="player-code" type="text" maxlength="4" autocomplete="off"
+               autocapitalize="characters" spellcheck="false" inputmode="text">
+      </label>
+      <label class="player-field" for="player-name">Your name
+        <input id="player-name" type="text" maxlength="24" autocomplete="off" spellcheck="false">
+      </label>
+      <p id="player-error" class="error-msg" role="alert"></p>
+      <button id="player-join-btn" class="btn btn-gold btn-big" type="button">Join</button>
+    </div>
+    <div id="player-buzzer" class="player-buzzer hidden">
+      <header class="player-head">
+        <span id="player-head-code" class="player-head-code"></span>
+        <span id="player-head-dot" aria-hidden="true"></span>
+        <span id="player-head-name" class="player-head-name"></span>
+      </header>
+      <button id="player-buzz" class="player-buzz-btn mode-idle" type="button" disabled></button>
+      <p id="player-buzz-note" class="player-buzz-note"></p>
+      <footer class="player-foot">
+        <button id="player-leave" class="btn btn-ghost btn-small" type="button">Leave room</button>
+      </footer>
+    </div>
+
+    <!-- Wager form — reused for Daily Double and Final Jeopardy -->
+    <div id="player-wager" class="player-form hidden">
+      <p id="player-wager-title" class="player-form-title"></p>
+      <p id="player-wager-cat" class="player-form-cat"></p>
+      <p id="player-wager-meta" class="player-form-meta"></p>
+      <label class="player-field" for="player-wager-input">Your wager
+        <input id="player-wager-input" type="number" step="1" inputmode="numeric" autocomplete="off">
+      </label>
+      <p id="player-wager-error" class="error-msg" role="alert"></p>
+      <button id="player-wager-submit" class="btn btn-gold btn-big" type="button">Submit wager</button>
+    </div>
+
+    <!-- Final Jeopardy typed-answer form -->
+    <div id="player-answer" class="player-form hidden">
+      <p id="player-answer-cat" class="player-form-cat"></p>
+      <p id="player-answer-clue" class="player-form-clue"></p>
+      <label class="player-field" for="player-answer-input">Your response
+        <input id="player-answer-input" type="text" maxlength="120" autocomplete="off" spellcheck="false">
+      </label>
+      <p id="player-answer-note" class="player-form-note"></p>
+      <button id="player-answer-submit" class="btn btn-gold btn-big" type="button">Submit answer</button>
+    </div>
+
+    <!-- Generic message screen — waiting / result / reconnecting -->
+    <div id="player-message" class="player-message hidden">
+      <p id="player-message-title" class="player-message-title"></p>
+      <p id="player-message-sub" class="player-message-sub"></p>
+    </div>
+  </section>
+
   <script src="js/data.js"></script>
+  <script src="js/buzzer-protocol.js"></script>
+  <script src="js/buzzer-player.js"></script>
   <script src="js/app.js"></script>
+  <script src="js/buzzer-host.js"></script>
+  <script src="js/buzzer-wagers.js"></script>
   <script src="js/editor.js"></script>
 </body>
 </html>

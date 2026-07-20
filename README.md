@@ -129,13 +129,96 @@ Two more ways to use custom questions:
 Scoring follows house rules, not TV rules — e.g. players at $0 or less can
 still play Final Jeopardy (with a $0 wager).
 
+## Buzzer rooms (optional)
+
+Turn phones into real buzzers. It's completely optional — if you never open a
+room, the game behaves exactly as above and makes no network calls beyond
+loading `questions.json`.
+
+### How it works
+
+- On the start screen, under **Players**, click **Open buzzer room**. You get a
+  big 4-letter **room code** and a join link.
+- Each player opens the **same site URL on their phone** and appends
+  `?room=CODE` (or just types the code on the join screen), enters their name,
+  and gets a full-screen buzzer button. Their name links to a scoreboard player
+  (a new one is added automatically if the name is new).
+- During a regular clue, finish reading, then click **Arm buzzers** — or just
+  press the **Spacebar** (it toggles arm/disarm the instant you finish reading,
+  no mouse hunt). The first player to tap wins; you see their name with ✓ / ✗
+  buttons right there (same scoring as usual). ✗ locks that player out and
+  re-arms the rest; ✓ closes the clue. Daily Doubles and Final Jeopardy never
+  show a buzz bar, and Space only does anything while that bar is live.
+- On the board screen a small `CODE · n 🔔` chip in the top bar toggles the room
+  panel (join link, connected players, kick, close). **New Game** keeps the room
+  open. If you refresh, the room auto-reopens with the same code so phones
+  reconnect on their own.
+
+### What you need to know
+
+- **Needs internet.** Signaling uses the free public **PeerJS** cloud broker
+  (pinned build `peerjs@1.5.5` from cdnjs, loaded lazily only when you first
+  open a room or a phone visits `?room=`). After that, phone ↔ host traffic is
+  peer-to-peer WebRTC. **No game data ever touches any server** — only the
+  room-code handshake goes through the broker.
+- `?room=CODE` takes precedence over `?game=URL`: a page opened with `?room=` is
+  always the player buzzer, never the host game.
+- **Troubleshooting:** strict corporate/school networks sometimes block WebRTC —
+  buzzers won't connect there. If the room code collides on open, the app
+  regenerates and retries automatically. Offline? The feature is simply
+  unavailable; the game itself is unaffected.
+- Not built (yet): early-buzz penalty timing windows are a possible future
+  addition; today a player can only buzz once the host arms.
+
+### Phone wagers & answers (Daily Double + Final Jeopardy)
+
+Connected phones double as contestant podiums. **Mixed mode is fully
+supported** — any player without a connected phone keeps the normal
+host-driven flow, and the host can always override a phone player (handy if a
+battery dies mid-Final).
+
+- **Daily Double.** When you open a Daily Double and the player picked in the
+  "Who's answering?" dropdown has a connected phone, that phone shows a wager
+  pad (with the legal range) and the splash notes they're wagering on their
+  phone. Their submitted wager locks the Daily Double exactly as a typed wager
+  would; an out-of-range wager is bounced back to the phone with the reason.
+  Changing the dropdown re-prompts the newly selected player. The manual wager
+  box stays usable the whole time — typing and locking it yourself wins.
+- **Secret Final wagers.** Every connected player wagers on their own phone.
+  Their wager arrives pre-filled on the host's wager list but **masked**
+  (shown as dots, `🔒 from phone`) so nothing leaks on a projector — a genuine
+  secret wager, unlike the manual boxes. An **Unlock** button hands the input
+  back to you for a manual override. Players without phones use the normal
+  editable boxes.
+- **Typed Final answers.** After you lock the wagers, phones show the Final
+  clue and a text box. Answers land in the host's judge rows verbatim, in
+  quotes, for **you to read and rule on with the usual ✓ / ✗** — the app never
+  auto-checks an answer, never auto-scores, and never advances on its own; you
+  drive the pace. An "Answers in: n/m" line just tells you how many are in.
+  Players may edit and resubmit until you reveal. As you rule each verdict,
+  that player's phone shows their result and new score.
+- **Final Jeopardy is one-shot.** Once you have judged Final, it can't be
+  replayed — the Final Jeopardy button and end-of-board banner route to the
+  standings instead, so wagers are never applied to scores twice. (Backing out
+  of Final *before* judging anything is still fine and re-prompts phones.)
+
 ## Project layout
 
 ```
-index.html        page structure
-css/styles.css    all styling
-js/app.js         game logic (vanilla JS, no dependencies)
-js/editor.js      in-page question editor
-js/data.js        built-in sample game (offline fallback)
-questions.json    the questions GitHub Pages serves — edit this one
+index.html               page structure
+css/styles.css           all styling
+css/buzzer.css           buzzer host panel + player phone screen styles
+js/app.js                game logic (vanilla JS, no dependencies)
+js/editor.js             in-page question editor
+js/data.js               built-in sample game (offline fallback)
+js/buzzer-protocol.js    pure buzzer core (room codes, validation, reducers)
+js/buzzer-host.js        host side: PeerJS load, room lifecycle, buzzer UI
+js/buzzer-wagers.js      host side: phone Daily-Double + Final wagers & answers
+js/buzzer-player.js      player side: phone join, buzzer, wager & answer screens
+questions.json           the questions GitHub Pages serves — edit this one
+tests/                   node:test unit tests + in-browser loopback harness
 ```
+
+The buzzer feature loads PeerJS lazily from a pinned, SRI-verified cdnjs URL
+(`peerjs@1.5.5`) only when a room is opened or a phone joins — the core game
+never requests it.

@@ -25,7 +25,9 @@ const MIN_WAGER = 5;
  *  active: null|{cat:number, row:number, revealed:boolean, missed:Record<string,boolean>,
  *                isDailyDouble:boolean, wagerLocked:boolean, wager:number, wagerPlayerId:string|null},
  *  final: null|{stage:'wager'|'clue'|'judge'|'standings', wagers:Record<string,number>,
- *               judged:Record<string,boolean>}
+ *               answers:Record<string,string>, judged:Record<string,boolean>},
+ *  finalPlayed: boolean,
+ *  buzzer: {roomCode: string|null}
  * }} */
 let state = freshState();
 
@@ -42,6 +44,8 @@ function freshState() {
     used: {},
     active: null,
     final: null,
+    finalPlayed: false,
+    buzzer: { roomCode: null },
   };
 }
 
@@ -68,7 +72,19 @@ function loadSavedState() {
     const saved = JSON.parse(raw);
     if (!saved || typeof saved !== "object" || !saved.phase) return null;
     if (saved.game) validateGame(saved.game);
-    return { ...freshState(), ...saved };
+    const restored = { ...freshState(), ...saved };
+    // Tolerate missing/invalid buzzer slice; a restored code must look real.
+    const savedCode =
+      saved.buzzer && typeof saved.buzzer.roomCode === "string" ? saved.buzzer.roomCode : null;
+    restored.buzzer = { roomCode: /^[A-Z2-9]{4}$/.test(savedCode || "") ? savedCode : null };
+    // Normalise the phone-Final additions on old saved states (spec §8.4).
+    if (restored.final && typeof restored.final === "object") {
+      if (!restored.final.answers || typeof restored.final.answers !== "object") {
+        restored.final = { ...restored.final, answers: {} };
+      }
+    }
+    if (typeof restored.finalPlayed !== "boolean") restored.finalPlayed = false;
+    return restored;
   } catch (err) {
     console.warn("Ignoring corrupt saved state:", err);
     return null;
@@ -195,6 +211,8 @@ function render() {
   show($("screen-board"), onBoard);
   show($("btn-new-game"), state.phase !== "setup");
   show($("btn-final"), onBoard && !!state.game?.finalJeopardy && !state.active);
+  // Once Final has been judged it is one-shot: the button routes to standings.
+  $("btn-final").textContent = state.finalPlayed ? "Final Standings" : "Final Jeopardy";
 
   $("game-title").textContent = state.game?.title || "Jeopardy";
 
@@ -206,6 +224,7 @@ function render() {
   }
   renderClueModal();
   renderFinalModal();
+  window.BuzzerHost?.onRender?.();
 }
 
 /* ============ Setup screen ============ */
@@ -298,6 +317,7 @@ function newGame() {
     sourceKind: state.sourceKind,
     sourceUrl: state.sourceUrl,
     players: state.players.map((p) => ({ ...p, score: 0 })),
+    buzzer: state.buzzer,
   };
   saveState();
   render();
@@ -363,7 +383,7 @@ function renderBoardDoneBanner() {
   const done = allCluesUsed() && !state.active && !state.final;
   show(banner, done);
   if (!done) return;
-  $("btn-board-done").textContent = state.game.finalJeopardy
+  $("btn-board-done").textContent = state.game.finalJeopardy && !state.finalPlayed
     ? "Play Final Jeopardy"
     : "Show Final Standings";
 }
@@ -428,6 +448,7 @@ function openClue(cat, row) {
     },
   });
   focusClueModal();
+  window.BuzzerHost?.onClueOpened?.();
 }
 
 function activeClue() {
@@ -528,6 +549,7 @@ function lockDailyDoubleWager() {
 
 function revealAnswer() {
   setState({ active: { ...state.active, revealed: true } });
+  window.BuzzerHost?.onAnswerRevealed?.();
 }
 
 function renderJudgeRow() {
@@ -587,6 +609,7 @@ function judgeWrong(playerId) {
     players,
     active: { ...active, missed: { ...active.missed, [playerId]: true } },
   });
+  window.BuzzerHost?.onJudgedWrong?.(playerId);
 }
 
 function closeClue(extraPatch = {}) {
@@ -601,16 +624,23 @@ function closeClue(extraPatch = {}) {
     const next = document.querySelector(".cell-clue:not(.used)") || $("btn-board-done");
     if (next) next.focus();
   });
+  window.BuzzerHost?.onClueClosed?.();
 }
 
 /* ============ Final Jeopardy ============ */
 
 function startFinal() {
-  setState({ final: { stage: "wager", wagers: {}, judged: {} } });
+  // One-shot: a fully judged Final can never restart (spec §8.3). Route the
+  // request to the standings the host already produced.
+  if (state.finalPlayed) {
+    showStandings();
+    return;
+  }
+  setState({ final: { stage: "wager", wagers: {}, answers: {}, judged: {} } });
 }
 
 function showStandings() {
-  setState({ final: { stage: "standings", wagers: {}, judged: {} } });
+  setState({ final: { stage: "standings", wagers: {}, answers: {}, judged: {} } });
 }
 
 function finalMaxWager(player) {
@@ -741,6 +771,7 @@ function renderFinalJudging(body) {
 
 function buildFinalJudgeRow(player) {
   const li = el("li");
+  li.dataset.playerId = player.id; // lets the buzzer glue target this row
   const wager = state.final.wagers[player.id] ?? 0;
   const judged = !!state.final.judged[player.id];
   li.appendChild(el("span", null, `${player.name} (wagered ${formatMoney(wager)})`));
@@ -769,11 +800,13 @@ function buildFinalJudgeRow(player) {
 function judgeFinal(playerId, correct) {
   const wager = state.final.wagers[playerId] ?? 0;
   const delta = correct ? wager : -wager;
+  // finalPlayed latches on the first verdict so Final can't be replayed (§8.3).
   setState({
     players: state.players.map((p) =>
       p.id === playerId ? { ...p, score: p.score + delta } : p
     ),
-    final: { ...state.final, judged: { ...state.final.judged, [playerId]: true } },
+    final: { ...state.final, judged: { ...state.final.judged, [playerId]: correct ? "correct" : "wrong" } },
+    finalPlayed: true,
   });
 }
 
@@ -848,6 +881,12 @@ function wireStaticEvents() {
 }
 
 async function init() {
+  // Player mode: the phone-buzzer page. buzzer-player.js drives it; the host
+  // game must not boot (no fetch, no state restore, no host rendering).
+  if (new URLSearchParams(window.location.search).has("room")) {
+    document.body.classList.add("player-mode");
+    return;
+  }
   wireStaticEvents();
   const gameParam = new URLSearchParams(window.location.search).get("game");
   const saved = loadSavedState();
