@@ -145,12 +145,17 @@ loading `questions.json`.
   it. They enter their name and get a full-screen buzzer button. Their name
   links to a scoreboard player (a new one is added automatically if the name
   is new).
-- During a regular clue, finish reading, then click **Arm buzzers** — or just
-  press the **Spacebar** (it toggles arm/disarm the instant you finish reading,
-  no mouse hunt). The first player to tap wins; you see their name with ✓ / ✗
-  buttons right there (same scoring as usual). ✗ locks that player out and
-  re-arms the rest; ✓ closes the clue. Daily Doubles and Final Jeopardy never
-  show a buzz bar, and Space only does anything while that bar is live.
+- The moment you open a regular clue, every phone's buzzer turns **red**
+  ("Wait for it…") — and it's live, just like the show: **tapping while it's
+  red locks that player out of the clue** ("Too soon!"), and the buzz bar
+  shows you who jumped the gun. Finish reading, then click **Arm buzzers** —
+  or just press the **Spacebar** (it toggles arm/disarm, no mouse hunt) —
+  and the surviving buzzers flip **green** ("BUZZ!").
+- The first green-light tap wins; you see their name with ✓ / ✗ buttons right
+  there (same scoring as usual). ✗ locks that player out and re-arms the
+  rest; ✓ closes the clue. Early and wrong-answer lockouts both clear on the
+  next clue. Daily Doubles and Final Jeopardy never show a buzz bar (no trap
+  there), and Space only does anything while that bar is live.
 - On the board screen a small `CODE · n 🔔` chip in the top bar toggles the room
   panel (join link, connected players, kick, close). **New Game** keeps the room
   open. If you refresh, the room auto-reopens with the same code so phones
@@ -169,8 +174,11 @@ loading `questions.json`.
   buzzers won't connect there. If the room code collides on open, the app
   regenerates and retries automatically. Offline? The feature is simply
   unavailable; the game itself is unaffected.
-- Not built (yet): early-buzz penalty timing windows are a possible future
-  addition; today a player can only buzz once the host arms.
+- **Early buzzes are host-judged by arrival**: a tap that reaches the host
+  while the buzzer is still red locks that player out of the clue; a tap that
+  arrives after you arm counts, even if their screen hadn't flipped green yet
+  (network skew forgives knife-edge timing). There's no timed penalty window
+  like the TV show's — going early costs you the whole clue.
 
 ### Phone wagers & answers (Daily Double + Final Jeopardy)
 

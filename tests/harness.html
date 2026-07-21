@@ -20,7 +20,7 @@
   </style>
 </head>
 <body>
-  <h1>Buzzer loopback harness — scenarios I1 + I2</h1>
+  <h1>Buzzer loopback harness — scenarios I1 + I2 + I3</h1>
   <p id="summary">Running…</p>
   <ul id="results"></ul>
 
@@ -337,6 +337,52 @@
         check("I2 no uncaught errors during scenario", uncaught === null);
       }
 
+      /* ---- scenario I3 — reading phase + early-buzz lockout ---- */
+      async function runI3() {
+        // Two fresh phones. The room + prior phones stay connected; we assert
+        // only on these two, so the broadcast to the others is harmless.
+        const eve = makePlayer("Eve", 5);
+        const fay = makePlayer("Fay", 6);
+        check("I3 Eve + Fay joined on the buzzer", eve.ui.screen === "buzzer" && fay.ui.screen === "buzzer");
+
+        // A regular clue opens -> both phones flip to the RED reading trap.
+        window.state = Object.assign({}, window.state, {
+          active: { isDailyDouble: false, revealed: false, cat: 0, row: 0 }, final: null,
+        });
+        BuzzerHost.onClueOpened();
+        check("I3 clue opens -> both phones reading", eve.ui.mode === "reading" && fay.ui.mode === "reading");
+
+        // Eve taps during red -> early lockout for Eve only (reason "early");
+        // Fay stays reading, and no one has won.
+        eve.conn.send({ v: 1, t: "buzz" });
+        check("I3 Eve early-locked (reason early)", eve.ui.mode === "locked" && eve.ui.lockReason === "early");
+        check("I3 Fay still reading, no winner", fay.ui.mode === "reading" && BuzzerHost._roomState().winnerId === null);
+
+        // Host arms -> Fay flips GREEN (armed); Eve stays locked out.
+        BuzzerHost.arm();
+        check("I3 arm -> Fay armed, Eve still locked", fay.ui.mode === "armed" && eve.ui.mode === "locked");
+
+        // Fay buzzes -> wins normally (early lockout never blocked the real round).
+        fay.conn.send({ v: 1, t: "buzz" });
+        check("I3 Fay wins the buzz", fay.ui.mode === "won");
+
+        // Clue closes -> both idle, lockout cleared.
+        BuzzerHost.onClueClosed();
+        check("I3 clue reset -> both idle", eve.ui.mode === "idle" && fay.ui.mode === "idle");
+
+        // Next regular clue opens -> both reading again; Eve is buzzable (the
+        // lockout did NOT survive the clue change).
+        window.state = Object.assign({}, window.state, {
+          active: { isDailyDouble: false, revealed: false, cat: 0, row: 0 },
+        });
+        BuzzerHost.onClueOpened();
+        check("I3 next clue -> both reading again (lockout cleared)", eve.ui.mode === "reading" && fay.ui.mode === "reading");
+
+        // Reset the board so we leave the harness in a clean state.
+        BuzzerHost.onClueClosed();
+        check("I3 no uncaught errors during scenario", uncaught === null);
+      }
+
       function renderResults() {
         const list = document.getElementById("results");
         let passed = 0;
@@ -362,6 +408,7 @@
       const start = () =>
         run()
           .then(runI2)
+          .then(runI3)
           .catch((err) => { check("scenario ran without throwing: " + err.message, false); })
           .finally(renderResults);
       if (document.readyState === "complete") start();

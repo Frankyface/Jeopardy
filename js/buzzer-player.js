@@ -25,11 +25,16 @@
 
   const LABELS = {
     idle: "Wait for the host…",
+    reading: "Wait for it…",
     armed: "BUZZ!",
     won: "You buzzed in! Answer!",
     taken: "buzzed first",
     locked: "Locked out for this clue",
+    lockedEarly: "Too soon! Locked out for this clue",
   };
+  // Buttons the player can actually press. `reading` is the RED trap: pressable,
+  // and a tap during it early-locks you (the host arbitrates by arrival order).
+  const PRESSABLE = new Set(["reading", "armed"]);
 
   /* ============ Module state ============ */
 
@@ -266,7 +271,10 @@
   }
 
   function sendBuzz() {
-    if (ui.mode !== "armed") return;
+    // Send during reading too — the host locks an early tap out, but a tap on the
+    // knife-edge of arming is forgiven by arrival order (spec §5). Idle/won/etc.
+    // are disabled buttons, so they never reach here.
+    if (!PRESSABLE.has(ui.mode)) return;
     safeSend({ v: 1, t: "buzz" });
   }
 
@@ -395,13 +403,14 @@
     if (!btn) return;
     const mode = connLive ? ui.mode : "idle";
     btn.className = `player-buzz-btn mode-${mode}`;
-    btn.disabled = mode !== "armed";
+    btn.disabled = !PRESSABLE.has(mode);
     btn.textContent = buzzLabel(mode);
   }
 
   function buzzLabel(mode) {
     if (!connLive) return "Reconnecting…";
     if (mode === "taken") return `${ui.by || "Someone"} ${LABELS.taken}`;
+    if (mode === "locked" && ui.lockReason === "early") return LABELS.lockedEarly;
     return LABELS[mode] || LABELS.idle;
   }
 

@@ -41,8 +41,12 @@
   // pure printable ASCII (no literal control bytes in the file).
   const CONTROL_CHARS = new RegExp("[\\u0000-\\u001F\\u007F-\\u009F]", "g");
 
-  /** @typedef {"idle"|"armed"|"won"|"taken"|"locked"} BuzzerMode */
-  const BUZZER_MODES = new Set(["idle", "armed", "won", "taken", "locked"]);
+  /** @typedef {"idle"|"reading"|"armed"|"won"|"taken"|"locked"} BuzzerMode */
+  /** @typedef {"early"|"wrong"} LockReason — why a phone is locked out this clue. */
+  const BUZZER_MODES = new Set(["idle", "reading", "armed", "won", "taken", "locked"]);
+  // Accompanies a `locked` buzzer message; a missing reason is treated as "wrong"
+  // so older messages stay valid (spec §5).
+  const LOCK_REASONS = new Set(["early", "wrong"]);
   const REJECT_REASONS = new Set(["name-taken", "room-full", "bad-name"]);
   const FINAL_STAGES = new Set(["wager", "answer", "waiting"]);
   const INPUT_REJECT_KINDS = new Set(["dd-wager", "final-wager", "final-answer"]);
@@ -57,7 +61,7 @@
    * @typedef {{v:1, t:"final-answer", text:string}} FinalAnswerMsg
    * @typedef {{v:1, t:"joined", playerName:string}} JoinedMsg
    * @typedef {{v:1, t:"reject", reason:"name-taken"|"room-full"|"bad-name"}} RejectMsg
-   * @typedef {{v:1, t:"buzzer", mode:BuzzerMode, by?:string}} BuzzerMsg
+   * @typedef {{v:1, t:"buzzer", mode:BuzzerMode, by?:string, reason?:LockReason}} BuzzerMsg
    * @typedef {{v:1, t:"dd-wager-request", category:string, clueValue:number,
    *            score:number, min:number, max:number}} DdWagerRequestMsg
    * @typedef {{v:1, t:"dd-wager-accepted", amount:number}} DdWagerAcceptedMsg
@@ -81,8 +85,10 @@
    * @typedef {{name:string, playerId:string|null, connected:boolean}} RoomPlayer
    * @typedef {{
    *   armed:boolean,
+   *   reading:boolean,
    *   winnerId:string|null,
    *   lockedOut:Record<string,boolean>,
+   *   lockReason:Record<string,LockReason>,
    *   players:Record<string,RoomPlayer>
    * }} RoomState
    *
@@ -100,16 +106,19 @@
    * @typedef {{type:"disarm"}} DisarmEvent
    * @typedef {{type:"judgedWrong", playerId:string}} JudgedWrongEvent
    * @typedef {{type:"clueReset"}} ClueResetEvent
+   * @typedef {{type:"clueOpened"}} ClueOpenedEvent — regular clue opened: reading window starts.
+   * @typedef {{type:"answerRevealed"}} AnswerRevealedEvent — window ends unarmed.
    * @typedef {{type:"leave", peerId:string}} LeaveEvent
-   * @typedef {JoinEvent|BuzzEvent|ArmEvent|DisarmEvent|JudgedWrongEvent|ClueResetEvent|LeaveEvent} RoomEvent
+   * @typedef {JoinEvent|BuzzEvent|ArmEvent|DisarmEvent|JudgedWrongEvent|ClueResetEvent|
+   *           ClueOpenedEvent|AnswerRevealedEvent|LeaveEvent} RoomEvent
    *
    * @typedef {{category?:string, clueValue?:number, score?:number, min?:number,
    *            max?:number, clue?:string}} PlayerPrompt
    * @typedef {{correct:boolean, delta:number, score:number}} PlayerResult
    * @typedef {{screen:"join"|"buzzer"|"dd-wager"|"final-wager"|"final-answer"|
    *            "final-waiting"|"final-result",
-   *            mode:BuzzerMode, by:string|null, playerName:string|null,
-   *            notice:string|null, prompt:PlayerPrompt|null,
+   *            mode:BuzzerMode, by:string|null, lockReason:LockReason|null,
+   *            playerName:string|null, notice:string|null, prompt:PlayerPrompt|null,
    *            result:PlayerResult|null}} PlayerUiState
    */
 
@@ -301,6 +310,11 @@
     /** @type {BuzzerMsg} */
     const out = { v: 1, t: "buzzer", mode: /** @type {BuzzerMode} */ (m.mode) };
     if (typeof m.by === "string") out.by = m.by;
+    // An unknown/absent reason is dropped, not fatal — receivers treat a locked
+    // message with no reason as "wrong" (spec §5), so junk stays forward-compatible.
+    if (typeof m.reason === "string" && LOCK_REASONS.has(m.reason)) {
+      out.reason = /** @type {LockReason} */ (m.reason);
+    }
     return out;
   }
 
@@ -312,8 +326,12 @@
   }
 
   /** @returns {BuzzerMsg} */
-  function buzzerMsg(mode, by) {
-    return by ? { v: 1, t: "buzzer", mode, by } : { v: 1, t: "buzzer", mode };
+  function buzzerMsg(mode, by, reason) {
+    /** @type {BuzzerMsg} */
+    const msg = { v: 1, t: "buzzer", mode };
+    if (by) msg.by = by;
+    if (reason) msg.reason = reason;
+    return msg;
   }
 
   /* ----- host→player payload builders (kept pure + testable, spec §8.4) ----- */
@@ -359,7 +377,7 @@
 
   /** @returns {RoomState} */
   function createRoomState() {
-    return { armed: false, winnerId: null, lockedOut: {}, players: {} };
+    return { armed: false, reading: false, winnerId: null, lockedOut: {}, lockReason: {}, players: {} };
   }
 
   /** Peer ids of players currently connected. @returns {string[]} */
@@ -371,7 +389,9 @@
   function modeForPeer(state, peerId) {
     if (state.lockedOut[peerId]) return "locked";
     if (state.winnerId) return peerId === state.winnerId ? "won" : "taken";
-    return state.armed ? "armed" : "idle";
+    if (state.armed) return "armed";
+    if (state.reading) return "reading";
+    return "idle";
   }
 
   /** Name to show as the buzz winner, if any. @returns {string|null} */
@@ -380,11 +400,16 @@
     return w ? w.name : null;
   }
 
-  /** Send every connected peer the buzzer mode it should currently see. */
+  /**
+   * Send every connected, NON-locked peer the buzzer mode it should now see.
+   * Locked phones are intentionally skipped: their screen (and its "early" vs
+   * "wrong" reason) is set once at lock time and must not be overwritten by a
+   * generic re-broadcast; a `clueReset` clears the lock and sends `idle`.
+   */
   function broadcastModes(state) {
-    return connectedPeers(state).map((id) =>
-      send(id, buzzerMsg(modeForPeer(state, id), winnerName(state)))
-    );
+    return connectedPeers(state)
+      .filter((id) => !state.lockedOut[id])
+      .map((id) => send(id, buzzerMsg(modeForPeer(state, id), winnerName(state))));
   }
 
   /* ============ Room reducer ============ */
@@ -405,6 +430,8 @@
       case "disarm": return reduceDisarm(state);
       case "judgedWrong": return reduceJudgedWrong(state, event);
       case "clueReset": return reduceClueReset(state);
+      case "clueOpened": return reduceClueOpened(state);
+      case "answerRevealed": return reduceAnswerRevealed(state);
       case "leave": return reduceLeave(state, event);
       default: return { next: state, effects: [] };
     }
@@ -481,15 +508,27 @@
   }
 
   /**
+   * A buzz is arbitrated purely by arrival order at the host (spec §5): armed →
+   * win; reading (open, not armed) → the sender jumped early and is locked out of
+   * this clue; anything else (idle / already won / already locked / gone) → ignore.
    * @param {RoomState} state
    * @param {BuzzEvent} event
    */
   function reduceBuzz(state, event) {
     const peer = state.players[event.peerId];
-    const canWin =
-      state.armed && !state.winnerId && peer && peer.connected && !state.lockedOut[event.peerId];
-    if (!canWin) return { next: state, effects: [] };
+    if (!peer || !peer.connected) return { next: state, effects: [] };
+    if (state.winnerId || state.lockedOut[event.peerId]) return { next: state, effects: [] };
+    if (state.armed) return winBuzz(state, event, peer);
+    if (state.reading) return earlyLock(state, event);
+    return { next: state, effects: [] }; // idle — no live clue window, no penalty
+  }
 
+  /**
+   * @param {RoomState} state
+   * @param {BuzzEvent} event
+   * @param {RoomPlayer} peer
+   */
+  function winBuzz(state, event, peer) {
     const next = { ...state, winnerId: event.peerId };
     /** @type {Effect[]} */
     const effects = [send(event.peerId, buzzerMsg("won"))];
@@ -499,6 +538,22 @@
       }
     }
     return { next, effects };
+  }
+
+  /**
+   * Early buzz during the reading window: lock the sender out of this whole clue
+   * (reusing lockedOut so arm/re-arm exclude them for free), tag the reason
+   * "early" for the host's buzz bar, and tell only that phone. Scores never move.
+   * @param {RoomState} state
+   * @param {BuzzEvent} event
+   */
+  function earlyLock(state, event) {
+    const next = {
+      ...state,
+      lockedOut: { ...state.lockedOut, [event.peerId]: true },
+      lockReason: { ...(state.lockReason || {}), [event.peerId]: "early" },
+    };
+    return { next, effects: [send(event.peerId, buzzerMsg("locked", null, "early"))] };
   }
 
   /** @param {RoomState} state */
@@ -529,18 +584,42 @@
       winnerId: null,
       armed: true,
       lockedOut: { ...state.lockedOut, [lockedPeer]: true },
+      lockReason: { ...(state.lockReason || {}), [lockedPeer]: "wrong" },
     };
     /** @type {Effect[]} */
-    const effects = [send(lockedPeer, buzzerMsg("locked"))];
+    const effects = [send(lockedPeer, buzzerMsg("locked", null, "wrong"))];
     for (const id of connectedPeers(next)) {
       if (id !== lockedPeer && !next.lockedOut[id]) effects.push(send(id, buzzerMsg("armed")));
     }
     return { next, effects };
   }
 
-  /** @param {RoomState} state */
+  /** Clue closed/next clue: wipe the whole per-clue slice, everyone back to idle. */
   function reduceClueReset(state) {
-    const next = { ...state, armed: false, winnerId: null, lockedOut: {} };
+    const next = { ...state, armed: false, reading: false, winnerId: null, lockedOut: {}, lockReason: {} };
+    return { next, effects: broadcastModes(next) };
+  }
+
+  /**
+   * A regular clue opened: the reading window begins. Non-locked phones flip to
+   * the RED "reading" trap; already-locked phones are a no-op (they keep their
+   * lockout, which a preceding clueReset would normally have cleared). Winner/arm
+   * are cleared defensively so the fresh window is clean.
+   * @param {RoomState} state
+   */
+  function reduceClueOpened(state) {
+    const next = { ...state, reading: true, armed: false, winnerId: null };
+    return { next, effects: broadcastModes(next) };
+  }
+
+  /**
+   * Answer revealed with nobody buzzed: the buzzable window ends. Phones go idle
+   * (reading false, not armed). A held winner (mid-judge) keeps their screen.
+   * @param {RoomState} state
+   */
+  function reduceAnswerRevealed(state) {
+    const next = { ...state, armed: false, reading: false };
+    if (state.winnerId) return { next, effects: [] };
     return { next, effects: broadcastModes(next) };
   }
 
@@ -569,7 +648,7 @@
   /** @returns {PlayerUiState} */
   function createPlayerUiState() {
     return {
-      screen: "join", mode: "idle", by: null, playerName: null,
+      screen: "join", mode: "idle", by: null, lockReason: null, playerName: null,
       notice: null, prompt: null, result: null,
     };
   }
@@ -594,14 +673,18 @@
     switch (msg.t) {
       case "joined":
         return {
-          ...ui, screen: "buzzer", mode: "idle", by: null,
+          ...ui, screen: "buzzer", mode: "idle", by: null, lockReason: null,
           playerName: msg.playerName, notice: null, prompt: null, result: null,
         };
       case "reject":
         return { ...ui, screen: "join", notice: rejectNotice(msg.reason) };
       case "buzzer":
-        // A live buzzer update clears any lingering "wager locked" beat.
-        return { ...ui, screen: "buzzer", mode: msg.mode, by: msg.by ?? null, prompt: null, notice: null };
+        // A live buzzer update clears any lingering "wager locked" beat. The lock
+        // reason (early vs wrong) rides along so the phone shows the right label.
+        return {
+          ...ui, screen: "buzzer", mode: msg.mode, by: msg.by ?? null,
+          lockReason: msg.reason ?? null, prompt: null, notice: null,
+        };
       case "dd-wager-request":
         return {
           ...ui, screen: "dd-wager", notice: null, result: null,
@@ -632,7 +715,7 @@
         return { ...ui, notice: msg.reason };
       case "room-closed":
         return {
-          ...ui, screen: "join", mode: "idle", by: null,
+          ...ui, screen: "join", mode: "idle", by: null, lockReason: null,
           notice: "The host closed the room.", prompt: null, result: null,
         };
       default:

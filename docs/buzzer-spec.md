@@ -31,7 +31,10 @@ now, still works offline from disk.
 
 ### Non-goals (do not build)
 
-- Early-buzz penalty timing windows (future idea; note in README as such).
+- ~~Early-buzz penalty timing windows~~ — **now in scope**: see the
+  "Reading phase & early-buzz lockout" bullet in §4.2 and the states table
+  in §4.3. Timed penalty windows (the TV show's 250 ms re-enable) remain out
+  of scope: an early buzz here locks you out of the whole clue.
 - Answer typing/submission from phones, chat, or player-side score display
   beyond buzzer state.
 - QR-code rendering (would need another library; the join URL is short enough).
@@ -120,6 +123,16 @@ a regular clue (NOT Daily Double, never Final Jeopardy):
   existing post-reveal judge row still works unchanged as the manual fallback;
   if someone had buzzed, highlight their chip (`.buzzed` class).
 - Arming is **manual** (host finishes reading first). No auto-arm on clue open.
+- **Reading phase & early-buzz lockout:** the moment a regular clue
+  opens (room open, ≥1 connected), all non-locked phones are pushed the new
+  `reading` mode — button RED and PRESSABLE. A buzz that arrives while
+  reading (not armed) locks that player out of THIS clue exactly like a
+  wrong answer would (they stay locked through arm/re-arm; next clue resets
+  them). Arming flips the remaining phones to `armed` — button GREEN. The
+  host's buzz bar lists early-locked players ("🚫 too soon: {names}") so the
+  host knows why a phone shows locked. Disarming via Space/button mid-clue
+  returns non-locked phones to `reading` (red — the trap is live again);
+  revealing the answer ends the buzzable window entirely (phones → `idle`).
 - **Arm hotkey — Spacebar.** So the host can unlock the instant they finish
   reading (no mouse hunt, no one buzzing early): while the buzz bar is live
   (room open, ≥1 connected, active REGULAR clue, answer not revealed) the
@@ -156,10 +169,17 @@ link — can get in from `https://…github.io/…/` directly.
 | Mode | Visual | Label |
 |------|--------|-------|
 | `idle` | dim navy, disabled | "Wait for the host…" |
-| `armed` | gold, glowing, enabled | "BUZZ!" |
+| `reading` | **vivid RED, ENABLED** (the trap) | "Wait for it…" |
+| `armed` | **vivid GREEN, glowing, enabled** | "BUZZ!" |
 | `won` | bright blue | "You buzzed in! Answer!" |
 | `taken` | dim, disabled | "{Name} buzzed first" |
-| `locked` | red-tinted, disabled | "Locked out for this clue" |
+| `locked` (wrong answer) | muted dark red, disabled | "Locked out for this clue" |
+| `locked` (buzzed early) | muted dark red, disabled | "Too soon! Locked out for this clue" |
+
+The red→green flip is the player's "go" signal, so the two must be
+unmistakable at a glance (distinct hues AND labels — not color alone,
+for colorblind players). Use green/red tones consistent with the existing
+✓/✗ judge buttons. `armed` was previously gold; it is now green by design.
 
 - Header: room code + connection dot + their player name. Footer: "Leave room".
 - Taps in any non-`armed` state do nothing (button disabled — no penalty).
@@ -194,8 +214,11 @@ Host → player:
   (possibly relinked) scoreboard name to display.
 - `{ v:1, t:"reject", reason:"name-taken"|"room-full"|"bad-name" }` — then the
   host closes that connection.
-- `{ v:1, t:"buzzer", mode:"idle"|"armed"|"won"|"taken"|"locked", by?:string }`
-  — `by` = buzzer-winner's name, present for `taken`.
+- `{ v:1, t:"buzzer", mode:"idle"|"reading"|"armed"|"won"|"taken"|"locked",
+  by?:string, reason?:"early"|"wrong" }`
+  — `by` = buzzer-winner's name, present for `taken`; `reason` accompanies
+  `locked` so the phone can say "Too soon!" vs the wrong-answer lockout
+  (missing `reason` → treat as `wrong`, keeping older messages valid).
 - `{ v:1, t:"dd-wager-request", category:string, clueValue:number,
   score:number, min:number, max:number }` — this player is answering a Daily
   Double; wager on your phone. Followed by `dd-wager-accepted` or `dd-cancel`.
@@ -224,8 +247,15 @@ Rules:
 - **Arbitration**: first `buzz` received by the host while armed and not locked
   out wins; host processing is single-threaded so order of arrival is the tie
   break. Later buzzes are ignored (their senders get `taken`).
-- `buzz` while not armed, from a locked-out player, or when someone already
-  won: silently ignored.
+- **Early-buzz rule — arrival order is authoritative**: a `buzz` that arrives
+  while the clue is in `reading` (open, not armed, not revealed) locks its
+  sender out of the current clue (`locked`, reason `early`). A buzz that
+  arrives after arming is valid even if the player's screen was still red
+  when they tapped (network skew forgives knife-edge timing; the host's
+  arrival clock is the single source of truth).
+- `buzz` while `idle` (no live clue window), from a locked-out player, or
+  when someone already won: silently ignored — no penalty outside the
+  reading window.
 - **Name rules**: trim; strip control characters; cap at 24 chars; empty after
   cleaning → `bad-name`. Case-insensitive match against the scoreboard roster:
   match found (and not already claimed by a live connection) → link to that
@@ -314,8 +344,13 @@ can `require`/`import` it directly):
 - `roomReduce(roomState, event)` → `{ next, effects }` where `effects` is a
   list of `{ to: peerId|"all", msg }` sends plus roster instructions for the
   glue layer (e.g. `{ addPlayer: name }`, `{ linkPlayer: playerId }`). Events:
-  `join`, `buzz`, `arm`, `disarm`, `judgedWrong`, `clueReset`, `leave`.
-  **Pure and immutable** — never mutates its inputs.
+  `join`, `buzz`, `arm`, `disarm`, `judgedWrong`, `clueReset`, `leave`, and
+  (for the §4.2 reading phase) `clueOpened` (reading window starts → push `reading`) and
+  `answerRevealed` (window ends unarmed → push `idle`). Room state tracks a
+  `reading` flag; `disarm` while the window is still open returns players to
+  `reading`, `clueReset` clears the flag. A `buzz` during `reading` produces
+  the early-lockout transition + effects (locked/reason:"early" to the
+  sender). **Pure and immutable** — never mutates its inputs.
 - `playerReduce(uiState, msg)` → next UI state for the player screen.
 
 `buzzer-host.js` / `buzzer-player.js` are thin glue: transport + DOM. The host
@@ -471,8 +506,9 @@ Serve statically for T2-T4 (e.g. `.claude/launch.json` entry running
 - **U5** arm: all connected, non-locked players receive `armed`.
 - **U6** first buzz wins: winner recorded; effects tell winner `won` and
   others `taken` with the winner's name; a second buzz changes nothing.
-- **U7** buzz ignored when: not armed / already won / sender locked out —
-  state unchanged, no effects.
+- **U7** buzz ignored when: `idle` (no reading window) / already won / sender
+  locked out — state unchanged, no effects. (Buzz during `reading` is NOT
+  ignored — see U17.)
 - **U8** `judgedWrong` on the winner: winner → `lockedOut`, gets `locked`;
   remaining unlocked players get `armed` again; `judgedWrong` on a non-winner
   changes nothing.
@@ -495,6 +531,19 @@ Serve statically for T2-T4 (e.g. `.claude/launch.json` entry running
   `dd-wager-accepted`, `dd-cancel`, `final` stages wager/answer/waiting,
   `final-result`, `final-cancel`, `input-rejected`) mapping each to the right
   phone screen; junk/out-of-order messages never throw.
+- **U17** early-buzz lockout (reducer): with the reading window open and not
+  armed, a `buzz` from P1 → P1 `lockedOut`, effect `locked`/reason `early`
+  to P1 only; other players unaffected. Subsequent `arm` pushes `armed` to
+  everyone EXCEPT P1. P1's further buzzes are ignored. `clueReset` clears the
+  lockout (P1 buzzable on the next clue). An early-locked player judged
+  nothing — scores never change from an early buzz.
+- **U18** reading-window transitions (reducer): `clueOpened` → `reading:true`
+  + `reading` pushed to connected non-locked players; `arm` → `armed` push;
+  `disarm` with the window still open → back to `reading` push (not `idle`);
+  `answerRevealed` → `reading:false` + `idle` push; `clueOpened` is a no-op
+  for players already locked. `locked` messages carry the right `reason`
+  ("early" vs "wrong"), and playerReduce maps `reading` + both locked reasons
+  to the correct screen states (extends U12).
 
 ### Loopback integration (T2) — MUST
 
@@ -507,6 +556,10 @@ Serve statically for T2-T4 (e.g. `.claude/launch.json` entry running
   submit → `input-rejected`) and a full phone Final (wager stage → both
   submit → answer stage → submits land, resubmit overwrites → waiting →
   results pushed with correct deltas → cancel path returns phones to idle).
+- **I3** harness early-buzz leg: clue opens → both phones `reading`; P1
+  buzzes early → P1 `locked`(early), P2 still `reading`; arm → P2 `armed`,
+  P1 still locked; P2 buzzes → `won`; clue reset → both `idle`; next
+  `clueOpened` → both `reading` again (lockout cleared).
 
 ### Real-network E2E (T3) — MUST, downgradable to BLOCKED-ENV with evidence
 
@@ -567,6 +620,16 @@ Serve statically for T2-T4 (e.g. `.claude/launch.json` entry running
   errors); typing a live room's code + a name connects exactly like a
   `?room=CODE` deep link (host shows the player 🟢). A wrong typed code shows
   "No room with that code" inline.
+- **E19** Early-buzz lockout + red/green, live: opening a regular clue turns
+  both phones RED/"Wait for it…" with the button ENABLED (computed
+  background is the red tone, `disabled === false`). P1 taps during red →
+  P1 goes locked "Too soon!" (muted, disabled) and the host buzz bar shows
+  the early-lock note; P2 stays red. Host arms → P2 flips GREEN "BUZZ!"
+  (computed background green) while P1 stays locked; P2's buzz wins and
+  scoring proceeds normally. Close the clue, open the next one → P1 is red
+  and buzzable again. Also: with NO clue open, phone buttons are dim idle
+  and pressing does nothing (no lockout) — updates the old E3 expectation
+  (armed is now green, not gold).
 
 ### Regression (T4) — MUST
 
@@ -590,6 +653,11 @@ Serve statically for T2-T4 (e.g. `.claude/launch.json` entry running
   `finalPlayed` restores cleanly mid-Final. The one visible intended change
   outside buzzer usage is the §8.3 one-shot guard: a fully judged Final can
   no longer be restarted (verify it engages in a manual-only game too).
+- **R8** The reading window can't leak: with a room open but a Daily Double
+  or Final Jeopardy on screen, phones stay `idle` (never `reading` — no
+  early-lockout trap on non-buzzable clues); with no room open, opening
+  clues touches no phone/network path at all (R1/R2 still hold). Early
+  lockouts never survive a clue change, a room close, or a rejoin.
 
 ### Static gates (T5) — MUST
 

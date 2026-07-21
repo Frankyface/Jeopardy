@@ -201,6 +201,16 @@
   text-shadow: 0 2px 3px rgba(0, 0, 0, 0.6);
 }
 
+/* Names of players who buzzed during the reading phase (locked out this clue). */
+.buzzer-early-note {
+  flex-basis: 100%;
+  margin: 0.15rem 0 0;
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--red);
+}
+
 @keyframes buzzer-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
@@ -355,17 +365,33 @@ body.player-mode {
 .player-buzz-btn.mode-idle,
 .player-buzz-btn.mode-taken { color: var(--ink-dim); }
 
+/* locked (either reason) — muted, dark, disabled. The label distinguishes
+   "Too soon!" (early) from the wrong-answer lockout; the look is shared. */
 .player-buzz-btn.mode-locked {
   color: #ffd9d9;
   background: radial-gradient(circle at 50% 38%, #5a1414 0%, #2a0808 72%);
   border-color: rgba(255, 107, 107, 0.4);
 }
 
+/* reading = the live trap: VIVID RED, ENABLED, "Wait for it…". A tap here buzzes
+   in early and locks you out. Uses the ✗-judge red tone; deliberately a bright,
+   saturated red so it can't be confused with the dark muted `locked` red. */
+.player-buzz-btn.mode-reading {
+  color: #fff;
+  background: radial-gradient(circle at 50% 36%, #ff9d9d 0%, var(--red) 45%, #d63a3a 100%);
+  border-color: #ffd0d0;
+  box-shadow: 0 0 0 6px rgba(255, 107, 107, 0.26), 0 18px 50px rgba(255, 107, 107, 0.42);
+}
+
+.player-buzz-btn.mode-reading:active { transform: scale(0.98); }
+
+/* armed = GREEN "go" (was gold): vivid, glowing, enabled. Uses the ✓-judge green
+   tone so red→green reads as an unmistakable stop→go flip for colourblind players. */
 .player-buzz-btn.mode-armed {
-  color: #2b1d00;
-  background: radial-gradient(circle at 50% 34%, #ffe08a 0%, var(--gold) 45%, var(--gold-deep) 100%);
-  border-color: #fff2c4;
-  box-shadow: 0 0 0 6px rgba(255, 204, 77, 0.28), 0 20px 60px rgba(255, 204, 77, 0.45);
+  color: #032818;
+  background: radial-gradient(circle at 50% 34%, #b6f5d0 0%, var(--green) 45%, #2b9a5f 100%);
+  border-color: #d6ffe7;
+  box-shadow: 0 0 0 6px rgba(81, 216, 138, 0.3), 0 20px 60px rgba(81, 216, 138, 0.5);
   animation: buzzer-glow 0.9s ease-in-out infinite;
 }
 
@@ -381,8 +407,8 @@ body.player-mode {
 .player-buzz-btn:disabled { cursor: default; }
 
 @keyframes buzzer-glow {
-  0%, 100% { box-shadow: 0 0 0 6px rgba(255, 204, 77, 0.28), 0 20px 60px rgba(255, 204, 77, 0.4); }
-  50% { box-shadow: 0 0 0 12px rgba(255, 204, 77, 0.14), 0 26px 70px rgba(255, 204, 77, 0.6); }
+  0%, 100% { box-shadow: 0 0 0 6px rgba(81, 216, 138, 0.3), 0 20px 60px rgba(81, 216, 138, 0.42); }
+  50% { box-shadow: 0 0 0 12px rgba(81, 216, 138, 0.16), 0 26px 70px rgba(81, 216, 138, 0.6); }
 }
 
 .player-foot {

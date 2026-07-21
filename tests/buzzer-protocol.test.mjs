@@ -1,5 +1,5 @@
 /* ============================================================
-   Unit tests for the pure buzzer protocol core (spec Part B, U1–U12).
+   Unit tests for the pure buzzer protocol core (spec Part B, U1–U18).
    Zero npm deps: node:test + node:assert only.
    Run from the project root:  node --test tests/
    ============================================================ */
@@ -196,14 +196,16 @@ test("U6 first buzz wins: winner won, others taken(by), second buzz no-op", () =
   assert.deepEqual(second.effects, []);
 });
 
-/* ============ U7 — buzz ignored ============ */
+/* ============ U7 — buzz ignored (amended: idle = no reading window) ============ */
 
-test("U7 buzz ignored: not armed / already won / locked out", () => {
+test("U7 buzz ignored: idle (no reading window) / already won / locked out", () => {
   const players = { A: peer("Ann", "p1"), B: peer("Bo", "p2") };
 
-  const notArmed = roomWith(players, { armed: false });
-  const r1 = BP.roomReduce(notArmed, { type: "buzz", peerId: "A" });
-  assert.equal(r1.next, notArmed);
+  // Idle = neither armed NOR reading: no live clue window, so a buzz is a silent
+  // no-op — no penalty outside the reading window (spec §5).
+  const idle = roomWith(players, { armed: false, reading: false });
+  const r1 = BP.roomReduce(idle, { type: "buzz", peerId: "A" });
+  assert.equal(r1.next, idle);
   assert.deepEqual(r1.effects, []);
 
   const alreadyWon = roomWith(players, { armed: true, winnerId: "A" });
@@ -215,6 +217,15 @@ test("U7 buzz ignored: not armed / already won / locked out", () => {
   const r3 = BP.roomReduce(lockedSender, { type: "buzz", peerId: "A" });
   assert.equal(r3.next, lockedSender);
   assert.deepEqual(r3.effects, []);
+
+  // Boundary: the SAME buzz while the reading window is open is NOT ignored — it
+  // early-locks the sender (full behaviour in U17). This proves the idle case
+  // above is specifically "no reading window", not merely "not armed".
+  const reading = roomWith(players, { armed: false, reading: true });
+  const r4 = BP.roomReduce(reading, { type: "buzz", peerId: "A" });
+  assert.notEqual(r4.next, reading);
+  assert.equal(r4.next.lockedOut.A, true);
+  assert.ok(r4.effects.length > 0);
 });
 
 /* ============ U8 — judgedWrong ============ */
@@ -287,6 +298,8 @@ test("U11 reducers never mutate frozen inputs", () => {
     { type: "disarm" },
     { type: "judgedWrong", playerId: "p1" },
     { type: "clueReset" },
+    { type: "clueOpened" },
+    { type: "answerRevealed" },
     { type: "leave", peerId: "A" },
   ];
   for (const event of events) {
@@ -472,4 +485,106 @@ test("U16 playerReduce maps DD/Final host messages to the right screen, junk-saf
     assert.doesNotThrow(() => BP.playerReduce(ui, junk));
     assert.equal(BP.playerReduce(ui, junk), ui);
   }
+});
+
+/* ============ U17 — early-buzz lockout (reducer) ============ */
+
+test("U17 early buzz during reading: sender locked (early) only, re-arm excludes them, reset clears", () => {
+  const reading = roomWith(
+    { A: peer("Ann", "p1"), B: peer("Bo", "p2") },
+    { armed: false, reading: true }
+  );
+
+  // P1 (A) jumps the gun during the reading window.
+  const early = BP.roomReduce(reading, { type: "buzz", peerId: "A" });
+  assert.equal(early.next.lockedOut.A, true);
+  assert.equal(early.next.lockReason.A, "early");
+  assert.equal(early.next.winnerId, null); // an early buzz never "wins"
+  // Exactly one effect — a locked+early message to P1, and nothing to P2. No
+  // roster/score instruction is emitted, so scores can never change from it.
+  assert.equal(early.effects.length, 1);
+  const toA = sendsTo(early.effects, "A");
+  assert.equal(toA[0].msg.mode, "locked");
+  assert.equal(toA[0].msg.reason, "early");
+  assert.equal(sendsTo(early.effects, "B").length, 0);
+  assert.ok(!early.effects.some((e) => e.addPlayer || e.linkPlayer));
+
+  // Arming now excludes the early-locked P1; only P2 is told "armed".
+  const armed = BP.roomReduce(early.next, { type: "arm" });
+  assert.ok(sendsTo(armed.effects, "B").some((e) => e.msg.mode === "armed"));
+  assert.ok(!sendsTo(armed.effects, "A").some((e) => e.msg.mode === "armed"));
+  assert.equal(armed.next.lockedOut.A, true); // still locked after arm
+
+  // P1's further buzzes (now that others are armed) stay ignored — no win.
+  const again = BP.roomReduce(armed.next, { type: "buzz", peerId: "A" });
+  assert.equal(again.next, armed.next);
+  assert.deepEqual(again.effects, []);
+
+  // clueReset clears the lockout so P1 is buzzable again on the next clue.
+  const reset = BP.roomReduce(armed.next, { type: "clueReset" });
+  assert.deepEqual(reset.next.lockedOut, {});
+  assert.deepEqual(reset.next.lockReason, {});
+  assert.ok(sendsTo(reset.effects, "A").some((e) => e.msg.mode === "idle"));
+});
+
+/* ============ U18 — reading-window transitions (reducer + playerReduce) ============ */
+
+test("U18 reading window: clueOpened/arm/disarm/answerRevealed + lock reasons + playerReduce", () => {
+  const base = roomWith({ A: peer("Ann", "p1"), B: peer("Bo", "p2"), C: peer("Cy", "p3", false) });
+
+  // clueOpened -> reading:true; reading pushed to connected non-locked (A,B); the
+  // disconnected C gets nothing.
+  const opened = BP.roomReduce(base, { type: "clueOpened" });
+  assert.equal(opened.next.reading, true);
+  assert.ok(sendsTo(opened.effects, "A").some((e) => e.msg.mode === "reading"));
+  assert.ok(sendsTo(opened.effects, "B").some((e) => e.msg.mode === "reading"));
+  assert.equal(sendsTo(opened.effects, "C").length, 0);
+
+  // arm -> armed push; the reading flag stays set underneath.
+  const armed = BP.roomReduce(opened.next, { type: "arm" });
+  assert.equal(armed.next.reading, true);
+  assert.ok(sendsTo(armed.effects, "A").some((e) => e.msg.mode === "armed"));
+
+  // disarm WITH the window still open -> back to reading (NOT idle) — the trap
+  // is live again (spec §4.2).
+  const disarmed = BP.roomReduce(armed.next, { type: "disarm" });
+  assert.equal(disarmed.next.armed, false);
+  assert.ok(sendsTo(disarmed.effects, "A").some((e) => e.msg.mode === "reading"));
+  assert.ok(!sendsTo(disarmed.effects, "A").some((e) => e.msg.mode === "idle"));
+
+  // answerRevealed -> reading:false + idle push (window closed for good).
+  const revealed = BP.roomReduce(disarmed.next, { type: "answerRevealed" });
+  assert.equal(revealed.next.reading, false);
+  assert.ok(sendsTo(revealed.effects, "A").some((e) => e.msg.mode === "idle"));
+
+  // clueOpened is a no-op for an already-locked player: no reading push to them.
+  const withLock = roomWith(
+    { A: peer("Ann", "p1"), B: peer("Bo", "p2") },
+    { lockedOut: { A: true }, lockReason: { A: "wrong" } }
+  );
+  const reopened = BP.roomReduce(withLock, { type: "clueOpened" });
+  assert.equal(sendsTo(reopened.effects, "A").length, 0);
+  assert.ok(sendsTo(reopened.effects, "B").some((e) => e.msg.mode === "reading"));
+
+  // locked messages carry the right reason: judgedWrong -> reason "wrong".
+  const wrong = BP.roomReduce(
+    roomWith({ A: peer("Ann", "p1"), B: peer("Bo", "p2") }, { armed: true, winnerId: "A" }),
+    { type: "judgedWrong", playerId: "p1" }
+  );
+  assert.equal(sendsTo(wrong.effects, "A").find((e) => e.msg.mode === "locked").msg.reason, "wrong");
+
+  // playerReduce maps reading + both locked reasons to the right screen states.
+  const ui = BP.createPlayerUiState();
+  const rUi = BP.playerReduce(ui, { v: 1, t: "buzzer", mode: "reading" });
+  assert.equal(rUi.screen, "buzzer");
+  assert.equal(rUi.mode, "reading");
+  const earlyUi = BP.playerReduce(ui, { v: 1, t: "buzzer", mode: "locked", reason: "early" });
+  assert.equal(earlyUi.mode, "locked");
+  assert.equal(earlyUi.lockReason, "early");
+  const wrongUi = BP.playerReduce(ui, { v: 1, t: "buzzer", mode: "locked", reason: "wrong" });
+  assert.equal(wrongUi.lockReason, "wrong");
+  // A locked message with no reason -> null lockReason (phone treats it as wrong).
+  const bareUi = BP.playerReduce(ui, { v: 1, t: "buzzer", mode: "locked" });
+  assert.equal(bareUi.mode, "locked");
+  assert.equal(bareUi.lockReason, null);
 });

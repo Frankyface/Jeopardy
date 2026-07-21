@@ -371,13 +371,19 @@ const BuzzerHost = (function () {
     renderAll();
   }
   function onClueOpened() {
-    dispatch({ type: "clueReset" });
-    // Run AFTER the clueReset idle-broadcast so a Daily-Double prompt is the
+    // A regular clue with a live audience opens the reading window (phones → RED
+    // "Wait for it…"); a Daily Double (or no connected players) just resets to
+    // idle — no early-buzz trap on non-buzzable clues (spec §4.2, R8). The prior
+    // clue's closeClue→clueReset already cleared any lockouts.
+    if (isBuzzBarLive()) dispatch({ type: "clueOpened" });
+    else dispatch({ type: "clueReset" });
+    // Run AFTER the reading/idle broadcast so a Daily-Double prompt is the
     // last word the answering phone hears (spec §8.1).
     window.BuzzerWagers?.onClueOpened?.();
   }
   function onAnswerRevealed() {
-    dispatch({ type: "disarm" });
+    // Ends the buzzable window entirely: phones → idle (not back to reading).
+    dispatch({ type: "answerRevealed" });
   }
   function onClueClosed() {
     dispatch({ type: "clueReset" });
@@ -565,6 +571,18 @@ const BuzzerHost = (function () {
     if (roomState.winnerId) bar.appendChild(buildWinnerBanner());
     else if (roomState.armed) bar.appendChild(buildArmedBar());
     else bar.appendChild(buildDisarmedBar());
+    const early = earlyLockedNames();
+    if (early.length > 0) {
+      bar.appendChild(el("p", "buzzer-early-note", `🚫 too soon: ${early.join(", ")}`));
+    }
+  }
+
+  /** Names of players locked out THIS clue for buzzing early (spec §4.2). */
+  function earlyLockedNames() {
+    const reasons = roomState.lockReason || {};
+    return Object.keys(roomState.players)
+      .filter((id) => roomState.lockedOut[id] && reasons[id] === "early")
+      .map((id) => roomState.players[id].name);
   }
 
   function buildDisarmedBar() {
