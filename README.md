@@ -139,10 +139,12 @@ loading `questions.json`.
 
 - On the start screen, under **Players**, click **Open buzzer room**. You get a
   big 4-letter **room code** and a join link.
-- Each player opens the **same site URL on their phone** and appends
-  `?room=CODE` (or just types the code on the join screen), enters their name,
-  and gets a full-screen buzzer button. Their name links to a scoreboard player
-  (a new one is added automatically if the name is new).
+- Each player opens the **same site URL on their phone** and taps
+  **Join a buzzer room** (under Players on the start screen), then types the
+  4-letter code — or uses the direct `?room=CODE` join link, which prefills
+  it. They enter their name and get a full-screen buzzer button. Their name
+  links to a scoreboard player (a new one is added automatically if the name
+  is new).
 - During a regular clue, finish reading, then click **Arm buzzers** — or just
   press the **Spacebar** (it toggles arm/disarm the instant you finish reading,
   no mouse hunt). The first player to tap wins; you see their name with ✓ / ✗

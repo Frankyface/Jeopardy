@@ -31,6 +31,22 @@
   color: var(--ink-dim);
 }
 
+/* Static "join from this page" note under the host panel (index.html). */
+.buzzer-join-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
+.buzzer-join-link {
+  color: var(--gold-text);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.buzzer-join-link:hover { text-decoration-thickness: 2px; }
+
 .buzzer-code-wrap { text-align: center; }
 
 .buzzer-code-label {

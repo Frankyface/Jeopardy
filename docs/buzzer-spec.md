@@ -138,7 +138,13 @@ a regular clue (NOT Daily Double, never Final Jeopardy):
 
 ### 4.3 Player experience (phone)
 
-Player mode = the page URL has a `room` query param (see §6.1).
+Player mode = the page URL has a `room` query param (see §6.1), including an
+EMPTY one (`?room=`) — that shows the join screen with a blank code field.
+The bare site URL's start screen carries a static "Playing on your phone?
+**Join a buzzer room**" link (an anchor to `?room=`, placed OUTSIDE the
+host-rendered `#buzzer-setup` container so decoration re-renders can't wipe
+it), so players who are only given the 4-letter code — not the full join
+link — can get in from `https://…github.io/…/` directly.
 
 - **Join screen**: room-code field (prefilled from `?room=CODE`, uppercase,
   4 chars), name field (maxlength 24, same cap as the host's player input),
@@ -555,6 +561,12 @@ Serve statically for T2-T4 (e.g. `.claude/launch.json` entry running
   standings); scores do not change a second time. Re-entry from the wager
   stage BEFORE any judging (Back to board → Final Jeopardy) still works and
   re-prompts phones without double-scoring.
+- **E18** Join from the bare URL: on the plain site URL (no query params) the
+  start screen shows the "Join a buzzer room" link; clicking it lands on the
+  player join screen with an EMPTY code field (no prefill error, no console
+  errors); typing a live room's code + a name connects exactly like a
+  `?room=CODE` deep link (host shows the player 🟢). A wrong typed code shows
+  "No room with that code" inline.
 
 ### Regression (T4) — MUST
 
