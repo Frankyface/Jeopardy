@@ -74,9 +74,11 @@
    * @typedef {{v:1, t:"final-cancel"}} FinalCancelMsg
    * @typedef {{v:1, t:"input-rejected", kind:"dd-wager"|"final-wager"|"final-answer", reason:string}} InputRejectedMsg
    * @typedef {{v:1, t:"room-closed"}} RoomClosedMsg
+   * @typedef {{v:1, t:"ping"}} PingMsg — player→host heartbeat (spec §9.3).
+   * @typedef {{v:1, t:"pong"}} PongMsg — host→player heartbeat reply (spec §9.3).
    * @typedef {JoinMsg|BuzzMsg|DdWagerMsg|FinalWagerMsg|FinalAnswerMsg|JoinedMsg|RejectMsg|BuzzerMsg|
    *           DdWagerRequestMsg|DdWagerAcceptedMsg|DdCancelMsg|FinalMsg|FinalResultMsg|FinalCancelMsg|
-   *           InputRejectedMsg|RoomClosedMsg} ProtocolMsg
+   *           InputRejectedMsg|RoomClosedMsg|PingMsg|PongMsg} ProtocolMsg
    */
 
   /* ============ Room-state typedefs ============ */
@@ -257,6 +259,10 @@
         };
       case "room-closed":
         return { v: 1, t: "room-closed" };
+      case "ping":
+        return { v: 1, t: "ping" }; // heartbeat (spec §9.3); additive, no payload
+      case "pong":
+        return { v: 1, t: "pong" }; // heartbeat reply (spec §9.3)
       default:
         return null; // unknown `t` → ignorable
     }

@@ -208,6 +208,8 @@ Player → host:
 - `{ v:1, t:"dd-wager", amount:number }` — reply to a `dd-wager-request`.
 - `{ v:1, t:"final-wager", amount:number }` — reply to `final` stage `wager`.
 - `{ v:1, t:"final-answer", text:string }` — reply to `final` stage `answer`.
+- `{ v:1, t:"ping" }` — heartbeat (§9.3); host replies `pong`; exempt from
+  the abuse guard.
 
 Host → player:
 - `{ v:1, t:"joined", playerName:string }` — accepted; `playerName` is the
@@ -234,6 +236,7 @@ Host → player:
 - `{ v:1, t:"input-rejected", kind:"dd-wager"|"final-wager"|"final-answer",
   reason:string }` — host-side validation failed; phone re-shows the form
   with the reason.
+- `{ v:1, t:"pong" }` — heartbeat reply (§9.3).
 - `{ v:1, t:"room-closed" }`
 
 All numeric inputs are validated **host-side** (authoritative — never trust
@@ -447,7 +450,89 @@ idempotent `onRender` pass — no further app.js surgery. The pure parts
 the final/DD payload builders) go in `buzzer-protocol.js` so they are
 unit-testable.
 
-## 9. README
+## 9. Connection resilience (the "some phones can't connect" package)
+
+Field report: some phones/devices fail to join rooms. Root cause analysis:
+signaling (broker) usually succeeds but the P2P data channel never opens —
+the classic **symmetric-NAT / CGNAT failure** (cellular data, strict venue
+WiFi), which STUN alone cannot traverse. Secondary real-world offenders:
+in-app webviews (Instagram/Messenger links), phones sleeping mid-game
+(connections die silently), and ICE negotiations that hang forever with no
+feedback. Fixes, all client-side and static-site compatible:
+
+### 9.1 TURN relay + richer ICE (the big one) — MUST
+
+Pass an explicit `config.iceServers` to BOTH `new Peer(...)` calls (host and
+player): Google STUN + Cloudflare STUN + the **Open Relay Project free public
+TURN** (metered.ca's openrelay) including its **turns: (TLS) endpoint on
+port 443** — relayed traffic then looks like ordinary HTTPS and passes most
+firewalls. Open Relay's credentials are intentionally public shared constants
+(like a STUN URL) — mark them with a comment so no one mistakes them for
+leaked secrets. The implementer MUST verify the current endpoints/credentials
+from Open Relay's live docs (do not code from memory) and record them in the
+report. Keep the total iceServers list small (≤ 4 entries — oversized lists
+slow ICE).
+
+### 9.2 Connect timeout — MUST
+
+Player side: if a `DataConnection` doesn't reach `open` within **15 s**,
+tear it down, surface a clear message, and let the retry/guidance flow take
+over (today it can sit on "Connecting…" forever when ICE hangs).
+
+### 9.3 Application heartbeat + liveness — MUST
+
+- New protocol messages (v1, additive): player→host `{v:1,t:"ping"}`, host→
+  player `{v:1,t:"pong"}`. Player pings every **10 s**; host answers pong
+  immediately (host may also use any inbound message as liveness evidence).
+- Player: no pong (or any host message) for **25 s** → connection is dead →
+  teardown + auto-reconnect (existing loop) with "Reconnecting…" UI.
+- Host: nothing heard from a player for **30 s** → mark them 🔴 (they'll
+  flip back 🟢 when they reconnect/relink). No roster removal — just honest
+  status.
+- On `visibilitychange` → visible, the player sends an immediate ping; no
+  reply in **3 s** → proactive teardown + reconnect (recovers phones whose
+  radios slept, in ~3 s instead of ~30).
+- Heartbeats must NOT count toward the abuse guard's message-rate limit.
+
+### 9.4 Failure guidance + in-app-browser hint — MUST
+
+- After **2** consecutive failed connect attempts, the join screen's error
+  expands with concrete tips (plain language): "Try joining the same WiFi as
+  the host", "Switch between WiFi and mobile data", "If you opened this from
+  a chat app, open it in Safari/Chrome instead".
+- Detect common in-app webviews (Instagram/FB Messenger/TikTok/Snapchat UA
+  markers) and show a proactive one-liner on the join screen advising a real
+  browser. UA sniffing here is a hint only — never block joining.
+
+### 9.5 Host broker resilience — SHOULD
+
+The host already calls `peer.reconnect()` on broker disconnect; extend it
+with capped retries + backoff and reflect broker state in the room panel/chip
+("reconnecting to server…") instead of silently hoping. Player connections
+that survived (P2P is independent of the broker once established) must keep
+working during a broker blip — do not tear the room down.
+
+### 9.6 Verification additions (Part B)
+
+- **U19** (unit): `validateMessage` accepts `ping`/`pong`; liveness
+  bookkeeping helpers (last-heard tracking / staleness decision) are pure and
+  tested with injected clocks — no real timers in unit tests.
+- **I4** (harness): heartbeat leg — pings answered with pongs; a silenced
+  host (pongs suppressed) trips the player's staleness path; visibility-probe
+  path exercised with the injected clock.
+- **E20** (live): (a) **relay-only proof** — with `iceTransportPolicy:
+  "relay"` forced (test hook or console patch), two tabs still connect and a
+  buzz round-trips: this physically proves the TURN relay works end-to-end;
+  (b) heartbeat observed on the wire (ping→pong within 2 s); (c) kill the
+  host tab mid-game → player flips to "Reconnecting…" within ~25 s (not 5
+  min); reopen host (auto room re-open) → player relinks without re-typing.
+- **R9** (regression): the untouched game still makes zero network requests;
+  ICE config exists only inside the lazy buzzer path; join-screen tips only
+  appear after failures (a clean first join shows none); all existing states
+  hold (heartbeat must not break arbitration, wagers, or reading-phase
+  timing).
+
+## 10. README
 
 Add a "Buzzer rooms (optional)" section: what it is, how to host/join, that it
 needs internet (PeerJS public broker for signaling, then peer-to-peer WebRTC),
@@ -469,9 +554,10 @@ text). "Done" = all MUST states pass.
 
 ## Tiers
 
-- **T1 — Unit (Node, no network):** `node --test tests/` from the project
-  root. Requires Node ≥ 18 (check `node --version` first; if Node is missing,
-  report BLOCKED for T1 and continue with T2-T5).
+- **T1 — Unit (Node, no network):** `node --test` from the project root
+  (bare — Node 24 rejects a `tests/` directory positional; auto-discovery
+  finds `tests/*.test.mjs`). Requires Node ≥ 18 (check `node --version`
+  first; if Node is missing, report BLOCKED for T1 and continue with T2-T5).
 - **T2 — Loopback integration (browser, no network):** open
   `tests/harness.html` via a local static server; it drives host reducer +
   player reducer through a scripted game over an in-page fake transport and

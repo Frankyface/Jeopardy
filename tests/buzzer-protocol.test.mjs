@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import BP from "../js/buzzer-protocol.js";
+import BN from "../js/buzzer-net.js";
 
 /* ---- helpers ------------------------------------------------ */
 
@@ -587,4 +588,52 @@ test("U18 reading window: clueOpened/arm/disarm/answerRevealed + lock reasons + 
   const bareUi = BP.playerReduce(ui, { v: 1, t: "buzzer", mode: "locked" });
   assert.equal(bareUi.mode, "locked");
   assert.equal(bareUi.lockReason, null);
+});
+
+/* ============ U19 — heartbeat validation + pure liveness helpers (spec §9.6) ============ */
+
+test("U19 validateMessage accepts ping/pong; BuzzerNet liveness helpers are pure under an injected clock", () => {
+  // ping/pong are additive, payload-free heartbeats; junk stays ignorable (never throws).
+  assert.deepEqual(BP.validateMessage({ v: 1, t: "ping" }), { v: 1, t: "ping" });
+  assert.deepEqual(BP.validateMessage({ v: 1, t: "pong" }), { v: 1, t: "pong" });
+  assert.equal(BP.validateMessage({ v: 2, t: "ping" }), null); // wrong version
+  assert.equal(BP.validateMessage({ t: "pong" }), null); // missing version
+  // playerReduce ignores heartbeats (they are transport-level, not screen changes).
+  const ui0 = BP.createPlayerUiState();
+  assert.equal(BP.playerReduce(ui0, { v: 1, t: "pong" }), ui0);
+
+  // createLiveness / markHeard: immutable, stamped by the injected clock.
+  const l0 = BN.createLiveness(1000);
+  assert.deepEqual(l0, { lastHeard: 1000 });
+  const l1 = BN.markHeard(l0, 5000);
+  assert.deepEqual(l1, { lastHeard: 5000 });
+  assert.deepEqual(l0, { lastHeard: 1000 }); // input untouched (pure)
+  assert.equal(BN.msSinceHeard(l1, 8000), 3000);
+
+  // Player staleness boundary at PLAYER_STALE_MS (25s): fresh one ms before, stale AT.
+  const stale = BN.PLAYER_STALE_MS;
+  const heard = BN.createLiveness(0);
+  assert.equal(BN.isStale(heard, stale - 1, stale), false);
+  assert.equal(BN.isStale(heard, stale, stale), true);
+  assert.equal(BN.isStale(heard, stale + 5000, stale), true);
+
+  // Host-side isStaleAt (raw timestamp): a never-heard peer (undefined) is NOT stale.
+  assert.equal(BN.isStaleAt(undefined, 999999, BN.HOST_STALE_MS), false);
+  assert.equal(BN.isStaleAt(0, BN.HOST_STALE_MS, BN.HOST_STALE_MS), true);
+  assert.equal(BN.isStaleAt(0, BN.HOST_STALE_MS - 1, BN.HOST_STALE_MS), false);
+
+  // Visibility-probe decision (§9.3): probe fired at t=10000 with a 3s deadline.
+  const probeStart = 10000;
+  const noReply = BN.createLiveness(probeStart - 1); // last heard BEFORE the probe
+  assert.equal(BN.probeFailed(probeStart, noReply, probeStart + 3000, BN.VISIBILITY_PROBE_MS), true); // deadline hit, silent → reconnect
+  assert.equal(BN.probeFailed(probeStart, noReply, probeStart + 2999, BN.VISIBILITY_PROBE_MS), false); // before deadline → wait
+  const replied = BN.markHeard(noReply, probeStart + 500); // a pong landed after the probe
+  assert.equal(BN.probeFailed(probeStart, replied, probeStart + 3000, BN.VISIBILITY_PROBE_MS), false); // heard back → healthy
+
+  // In-app-browser sniff (§9.4) — hint only; unknown/empty/non-string UA → null.
+  assert.equal(BN.detectInAppBrowser("Mozilla/5.0 (iPhone) Instagram 300.0.0"), "Instagram");
+  assert.equal(BN.isInAppBrowser("FBAN/FBIOS;FBAV/400.0"), true);
+  assert.equal(BN.detectInAppBrowser("Mozilla/5.0 (iPhone; CPU) Version/17 Safari/605"), null);
+  assert.equal(BN.detectInAppBrowser(""), null);
+  assert.equal(BN.detectInAppBrowser(null), null);
 });

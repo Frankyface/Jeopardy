@@ -20,12 +20,13 @@
   </style>
 </head>
 <body>
-  <h1>Buzzer loopback harness — scenarios I1 + I2 + I3</h1>
+  <h1>Buzzer loopback harness — scenarios I1 + I2 + I3 + I4</h1>
   <p id="summary">Running…</p>
   <ul id="results"></ul>
 
   <!-- Pure core -->
   <script src="../js/buzzer-protocol.js"></script>
+  <script src="../js/buzzer-net.js"></script>
 
   <!-- Minimal app-global shims so the real host glue can run headless.
        Defined BEFORE buzzer-host.js so its boot() finds them. No buzzer
@@ -383,6 +384,60 @@
         check("I3 no uncaught errors during scenario", uncaught === null);
       }
 
+      /* ---- scenario I4 — heartbeat: ping/pong, staleness, visibility probe (§9.3) ---- */
+      async function runI4() {
+        const BN = window.BuzzerNet;
+        check("I4 BuzzerNet module present", !!BN);
+
+        // Fresh phone. The real player glue isn't loaded here, so the pure BuzzerNet
+        // helpers ARE the player's liveness logic, driven by an INJECTED clock (no
+        // 25s real waits). We attach an extra data listener to observe host frames.
+        const gwen = makePlayer("Gwen", 7);
+        let clock = 0; // ms
+        let liveness = BN.createLiveness(clock);
+        let pongs = 0;
+        gwen.conn.on("data", (msg) => {
+          liveness = BN.markHeard(liveness, clock); // any inbound message = liveness
+          if (msg && msg.t === "pong") pongs += 1;
+        });
+
+        // (a) a ping is answered with a pong over the loopback.
+        gwen.conn.send({ v: 1, t: "ping" });
+        check("I4 host answers ping with pong", pongs === 1);
+        check("I4 liveness fresh right after the pong", !BN.isStale(liveness, clock, BN.PLAYER_STALE_MS));
+        // Several more pings must NOT trip the abuse guard (heartbeats are exempt).
+        for (let i = 0; i < 30; i += 1) gwen.conn.send({ v: 1, t: "ping" });
+        check("I4 heartbeats exempt from abuse guard (still connected)",
+          !!BuzzerHost._roomState().players["player-7"] && BuzzerHost._roomState().players["player-7"].connected);
+
+        // (b) suppress the host's pongs → the player's 25s staleness path trips.
+        BuzzerHost._suppressPong(true);
+        const before = pongs;
+        gwen.conn.send({ v: 1, t: "ping" }); // host stays silent now
+        check("I4 suppressed host sends no pong", pongs === before);
+        clock = BN.PLAYER_STALE_MS - 1;
+        check("I4 not stale one ms before 25s", !BN.isStale(liveness, clock, BN.PLAYER_STALE_MS));
+        clock = BN.PLAYER_STALE_MS;
+        check("I4 stale at 25s of silence → teardown+reconnect", BN.isStale(liveness, clock, BN.PLAYER_STALE_MS));
+
+        // (c) visibility probe: becoming visible fires a probe ping; no pong within 3s
+        // → fast reconnect. Suppressed host → probe fails; un-suppress → probe heals.
+        const probeStart = clock;
+        gwen.conn.send({ v: 1, t: "ping" }); // probe (still suppressed → silence)
+        check("I4 probe unanswered in 3s → reconnect",
+          BN.probeFailed(probeStart, liveness, probeStart + BN.VISIBILITY_PROBE_MS, BN.VISIBILITY_PROBE_MS));
+
+        BuzzerHost._suppressPong(false);
+        const probe2 = probeStart + BN.VISIBILITY_PROBE_MS;
+        clock = probe2;
+        gwen.conn.send({ v: 1, t: "ping" }); // answered synchronously over the loopback
+        check("I4 probe answered → healthy (no reconnect)",
+          !BN.probeFailed(probe2, liveness, probe2 + BN.VISIBILITY_PROBE_MS, BN.VISIBILITY_PROBE_MS));
+        check("I4 host resumed pongs", pongs === before + 1);
+
+        check("I4 no uncaught errors during scenario", uncaught === null);
+      }
+
       function renderResults() {
         const list = document.getElementById("results");
         let passed = 0;
@@ -409,6 +464,7 @@
         run()
           .then(runI2)
           .then(runI3)
+          .then(runI4)
           .catch((err) => { check("scenario ran without throwing: " + err.message, false); })
           .finally(renderResults);
       if (document.readyState === "complete") start();

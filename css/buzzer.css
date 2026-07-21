@@ -127,6 +127,14 @@
 
 .buzzer-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.3rem; }
 
+/* Broker health line — "reconnecting to server…" (spec §9.5). */
+.buzzer-broker {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--gold-text);
+}
+
 /* ============ Host: topbar chip + popover ============ */
 
 .buzzer-chip {
@@ -307,6 +315,40 @@ body.player-mode {
 }
 
 #player-join-btn { width: 100%; }
+
+/* In-app-browser advisory + post-failure connection tips (spec §9.4). Hints only. */
+.player-webview-hint {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--gold-text);
+  background: rgba(217, 164, 55, 0.12);
+  border: 1px solid rgba(217, 164, 55, 0.4);
+  border-radius: 10px;
+  padding: 0.6em 0.8em;
+}
+
+.player-tips {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--ink);
+  background: rgba(1, 1, 23, 0.4);
+  border: 1px solid rgba(170, 176, 224, 0.28);
+  border-radius: 10px;
+  padding: 0.7em 0.9em;
+}
+
+.player-tips-title { margin: 0 0 0.35em; font-weight: 700; color: var(--ink-dim); }
+
+.player-tips-list {
+  margin: 0;
+  padding-left: 1.1em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+}
 
 /* --- buzzer screen --- */
 

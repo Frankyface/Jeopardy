@@ -22,6 +22,8 @@
   const CODE_LEN = 4;
   const RECONNECT_MS = 3000;
   const CODE_RE = /^[A-Z2-9]{4}$/;
+  const NET = window.BuzzerNet; // connection-resilience layer (spec §9)
+  const FAIL_TIP_THRESHOLD = 2; // consecutive connect fails before the tips appear (§9.4)
 
   const LABELS = {
     idle: "Wait for the host…",
@@ -47,6 +49,13 @@
   let connLive = false;
   let wantConnected = false;
   let reconnectTimer = null;
+  // Connection-resilience timers + counters (spec §9.2–9.4).
+  let connectTimer = null; // 15s connect deadline
+  let pingTimer = null; // 10s ping cadence
+  let livenessTimer = null; // staleness poll
+  let probeTimer = null; // visibility-probe deadline
+  let liveness = null; // BuzzerNet last-heard record
+  let failCount = 0; // consecutive connect failures
   let peerJsPromise = null;
   let wakeLock = null;
   // Local "I submitted the current form" latch — cleared whenever a host
@@ -129,13 +138,19 @@
     connecting = true;
     setNotice("");
     render();
-    loadPeerJs().then(openPeer).catch(() => onConnectFail("Can't reach the buzzer server. Check your internet."));
+    loadPeerJs().then(openPeer).catch(() => {
+      noteFailure();
+      onConnectFail("Can't reach the buzzer server. Check your internet.");
+    });
   }
 
   function openPeer() {
     teardownPeer();
     try {
-      peer = new window.peerjs.Peer();
+      // Shared resilient ICE (STUN + Open Relay TURN/TURNS) — the same config the
+      // host uses (spec §9.1) so symmetric-NAT/CGNAT phones can open a channel.
+      const opts = NET && NET.PEER_OPTIONS;
+      peer = opts ? new window.peerjs.Peer(undefined, opts) : new window.peerjs.Peer();
     } catch (err) {
       onConnectFail("This browser can't use buzzers.");
       console.warn("Buzzer player peer error:", err);
@@ -150,14 +165,23 @@
     try {
       conn = peer.connect(PEER_PREFIX + code, { serialization: "json", metadata: { name: playerName } });
     } catch (err) {
+      noteFailure();
       onConnectFail("Couldn't reach that room.");
       console.warn("Buzzer player connect error:", err);
       return;
     }
+    // §9.2: if the data channel doesn't open within 15s (ICE hung), tear it down
+    // and let the retry/guidance flow take over instead of "Connecting…" forever.
+    clearTimeout(connectTimer);
+    connectTimer = setTimeout(onConnectTimeout, NET.CONNECT_TIMEOUT_MS);
     conn.on("open", () => {
       connecting = false;
       connLive = true;
+      failCount = 0; // a clean connection resets the failure guidance (§9.4)
+      clearTimeout(connectTimer);
+      connectTimer = null;
       cancelReconnect();
+      startHeartbeat();
       safeSend({ v: 1, t: "join", name: playerName });
       acquireWakeLock();
       render();
@@ -168,9 +192,10 @@
   }
 
   function handleMessage(data) {
+    liveness = NET.markHeard(liveness, Date.now()); // any host message = liveness (§9.3)
     const prevMode = ui.mode;
     const next = window.BuzzerProtocol.playerReduce(ui, data);
-    if (next === ui) return; // junk / ignorable message
+    if (next === ui) return; // junk / ignorable message (e.g. pong) — liveness noted above
     ui = next;
     // Any accepted host message either advances the screen or rejects our input,
     // so the local "submitted" latch no longer applies.
@@ -196,6 +221,7 @@
       return;
     }
     if (type === "network" || type === "server-error" || type === "socket-error" || type === "socket-closed") {
+      noteFailure();
       onConnectFail("Can't reach the buzzer server. Retrying…");
       dropped();
       return;
@@ -236,6 +262,60 @@
     }
   }
 
+  /* ============ Heartbeat, connect timeout + failure guidance (spec §9.2–9.4) ============ */
+
+  function startHeartbeat() {
+    stopHeartbeat();
+    liveness = NET.createLiveness(Date.now());
+    pingTimer = setInterval(() => safeSend({ v: 1, t: "ping" }), NET.PLAYER_PING_MS);
+    livenessTimer = setInterval(checkLiveness, NET.HEARTBEAT_SWEEP_MS);
+  }
+
+  function stopHeartbeat() {
+    if (pingTimer) clearInterval(pingTimer);
+    if (livenessTimer) clearInterval(livenessTimer);
+    if (probeTimer) clearTimeout(probeTimer);
+    pingTimer = livenessTimer = probeTimer = null;
+  }
+
+  // 25s of silence (no pong / host message) = a dead connection → reconnect (§9.3).
+  function checkLiveness() {
+    if (connLive && NET.isStale(liveness, Date.now(), NET.PLAYER_STALE_MS)) heartbeatLost();
+  }
+
+  // Wake-from-sleep probe (§9.3): on becoming visible, ping and demand a pong within
+  // 3s; no reply → fast reconnect (~3s, not the ~30s the plain staleness path takes).
+  function probeConnection() {
+    if (!connLive) return;
+    safeSend({ v: 1, t: "ping" });
+    const started = Date.now();
+    if (probeTimer) clearTimeout(probeTimer);
+    probeTimer = setTimeout(() => {
+      probeTimer = null;
+      if (connLive && NET.probeFailed(started, liveness, Date.now(), NET.VISIBILITY_PROBE_MS)) heartbeatLost();
+    }, NET.VISIBILITY_PROBE_MS + 50);
+  }
+
+  function heartbeatLost() {
+    teardownPeer(); // also stops the heartbeat + connect timer
+    dropped(); // → "Reconnecting…" UI + the existing reconnect loop
+  }
+
+  function onConnectTimeout() {
+    connectTimer = null;
+    if (connLive) return; // the data channel opened in time — nothing to do
+    teardownPeer();
+    noteFailure();
+    onConnectFail("Couldn't open the buzzer connection. Trying again…");
+    if (wantConnected) scheduleReconnect();
+  }
+
+  // A connectivity failure (timeout / network / load) — NOT a wrong code — bumps the
+  // counter that expands the join-screen tips after two in a row (§9.4).
+  function noteFailure() {
+    failCount += 1;
+  }
+
   function leave() {
     wantConnected = false;
     connLive = false;
@@ -248,6 +328,9 @@
   }
 
   function teardownPeer() {
+    stopHeartbeat();
+    if (connectTimer) clearTimeout(connectTimer);
+    connectTimer = null;
     try {
       if (conn && typeof conn.close === "function") conn.close();
     } catch (err) {
@@ -383,6 +466,53 @@
       btn.disabled = connecting;
       btn.textContent = connecting ? "Connecting…" : "Join";
     }
+    renderJoinExtras();
+  }
+
+  // Proactive in-app-browser advisory + post-failure connection tips (spec §9.4).
+  // Built here with textContent only (index.html has no elements for them); both are
+  // hints that only appear when relevant — they never block joining.
+  function renderJoinExtras() {
+    const host = $$("player-join");
+    if (!host || !NET) return;
+    const app = NET.detectInAppBrowser(navigator.userAgent);
+    let hint = $$("player-webview-hint");
+    if (app && !hint) {
+      hint = pel("p", "player-webview-hint");
+      hint.id = "player-webview-hint";
+      const label = $$("player-code") ? $$("player-code").closest("label") : null;
+      if (label) host.insertBefore(hint, label);
+      else host.appendChild(hint);
+    }
+    if (hint) {
+      pshow(hint, !!app);
+      if (app) {
+        hint.textContent = `Opened inside the ${app} app? Buzzers may not connect — tap ⋯ and “Open in Safari/Chrome”.`;
+      }
+    }
+    let tips = $$("player-tips");
+    const showTips = failCount >= FAIL_TIP_THRESHOLD;
+    if (showTips && !tips) {
+      tips = buildTips();
+      const err = $$("player-error");
+      if (err && err.parentNode) err.parentNode.insertBefore(tips, err.nextSibling);
+      else host.appendChild(tips);
+    }
+    if (tips) pshow(tips, showTips);
+  }
+
+  function buildTips() {
+    const box = pel("div", "player-tips");
+    box.id = "player-tips";
+    box.appendChild(pel("p", "player-tips-title", "Still can’t connect? Try:"));
+    const ul = pel("ul", "player-tips-list");
+    [
+      "Join the same Wi-Fi as the host",
+      "Switch between Wi-Fi and mobile data",
+      "If you opened this from a chat app, open it in Safari or Chrome instead",
+    ].forEach((t) => ul.appendChild(pel("li", null, t)));
+    box.appendChild(ul);
+    return box;
   }
 
   function renderBuzzer() {
@@ -504,7 +634,9 @@
     }
 
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && connLive) acquireWakeLock();
+      if (document.visibilityState !== "visible" || !connLive) return;
+      acquireWakeLock();
+      probeConnection(); // recover a slept radio in ~3s instead of ~30 (spec §9.3)
     });
   }
 

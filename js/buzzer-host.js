@@ -30,6 +30,10 @@ const BuzzerHost = (function () {
   const BEEP_HZ = 880;
   const BEEP_MS = 150;
   const HOTKEY_DEBOUNCE_MS = 300; // Space arm/disarm debounce.
+  // Broker-reconnect backoff (spec §9.5): capped exponential retries; P2P survives a blip.
+  const MAX_BROKER_RETRIES = 8;
+  const BROKER_BASE_MS = 1000;
+  const BROKER_MAX_MS = 15000;
 
   /* ============ Module state (never serialised) ============ */
 
@@ -52,6 +56,12 @@ const BuzzerHost = (function () {
   let idCounter = 0;
   let wired = false;
   let lastToggleAt = 0; // for the Space-hotkey debounce.
+  // Heartbeat + broker health (spec §9.3, §9.5) — transport-only, never serialised.
+  const lastHeard = new Map(); // peerId → ms of the last inbound message
+  const stalePeers = new Set(); // peers silent past HOST_STALE_MS (🔴 overlay; no removal)
+  let heartbeatTimer = null, suppressPong = false; // suppressPong: harness seam (I4)
+  let brokerStatus = "ok"; // "ok" | "reconnecting" | "lost"
+  let brokerRetries = 0, brokerTimer = null;
 
   /* ============ App-global bridges (defensive) ============ */
 
@@ -110,7 +120,9 @@ const BuzzerHost = (function () {
 
   function createPeer(id) {
     if (customPeerFactory) return customPeerFactory(id);
-    return new window.peerjs.Peer(id);
+    // Shared resilient ICE for symmetric-NAT/CGNAT phones (spec §9.1); degrade if net absent.
+    const opts = window.BuzzerNet && window.BuzzerNet.PEER_OPTIONS;
+    return opts ? new window.peerjs.Peer(id, opts) : new window.peerjs.Peer(id);
   }
 
   /* ============ Room lifecycle ============ */
@@ -140,20 +152,16 @@ const BuzzerHost = (function () {
       roomStatus = "open";
       roomError = null;
       openRetries = 0;
+      brokerRecovered(); // also covers a re-fired open after a broker blip (§9.5)
+      // Host liveness sweep (spec §9.3): flag phones silent >30s as 🔴.
+      if (!heartbeatTimer) heartbeatTimer = setInterval(sweepLiveness, window.BuzzerNet ? window.BuzzerNet.HEARTBEAT_SWEEP_MS : 5000);
       persistRoomCode(code);
       renderAll();
     });
     peer.on("connection", handleConnection);
     peer.on("error", handlePeerError);
-    if (typeof peer.on === "function") {
-      peer.on("disconnected", () => {
-        try {
-          if (peer && typeof peer.reconnect === "function") peer.reconnect();
-        } catch (err) {
-          console.warn("Buzzer reconnect failed:", err);
-        }
-      });
-    }
+    // Broker drop → capped-backoff reconnect while P2P keeps working (spec §9.5).
+    if (typeof peer.on === "function") peer.on("disconnected", onBrokerDisconnected);
   }
 
   function handlePeerError(err) {
@@ -174,7 +182,10 @@ const BuzzerHost = (function () {
       return;
     }
     if (type === "network" || type === "server-error" || type === "socket-error" || type === "socket-closed") {
-      failRoom("Lost the connection to the buzzer server.", err);
+      // A blip AFTER the room opened must NOT tear it down — P2P keeps working;
+      // re-signal (spec §9.5). Only a failure before the room opened is fatal.
+      if (roomStatus === "open") onBrokerDisconnected();
+      else failRoom("Lost the connection to the buzzer server.", err);
       return;
     }
     console.warn("Buzzer peer error:", err);
@@ -199,6 +210,8 @@ const BuzzerHost = (function () {
     setTimeout(destroyPeer, CLOSE_FLUSH_MS);
     connections.clear();
     msgTimes.clear();
+    lastHeard.clear();
+    stalePeers.clear();
     roomState = window.BuzzerProtocol.createRoomState();
     roomStatus = "closed";
     roomCode = null;
@@ -215,6 +228,12 @@ const BuzzerHost = (function () {
       console.warn("Buzzer: destroy failed", err);
     }
     peer = null;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+    if (brokerTimer) clearTimeout(brokerTimer);
+    brokerTimer = null;
+    brokerStatus = "ok";
+    brokerRetries = 0;
   }
 
   /* ============ Connections & inbound messages ============ */
@@ -229,16 +248,20 @@ const BuzzerHost = (function () {
   }
 
   function handleData(conn, data) {
-    if (isFlooding(conn.peer)) {
+    markHeard(conn.peer); // any inbound message is liveness evidence (spec §9.3)
+    const msg = window.BuzzerProtocol.validateMessage(data);
+    // Valid heartbeats bypass the abuse guard (spec §9.3); junk still counts.
+    const isHeartbeat = !!msg && (msg.t === "ping" || msg.t === "pong");
+    if (!isHeartbeat && isFlooding(conn.peer)) {
       dropConnection(conn.peer, false);
       return;
     }
-    const msg = window.BuzzerProtocol.validateMessage(data);
     if (!msg) return;
+    if (msg.t === "ping") { if (!suppressPong) trySend(conn, { v: 1, t: "pong" }); return; }
+    if (msg.t === "pong") return; // liveness already recorded above
     if (msg.t === "join") handleJoin(conn, msg.name);
     else if (msg.t === "buzz") handleBuzz(conn.peer);
-    // Daily-Double / Final wager + answer messages are owned by the wagers
-    // module (kept out of this file to respect the 800-line house limit).
+    // DD / Final wager + answer messages are owned by the wagers module.
     else if (window.BuzzerWagers) window.BuzzerWagers.handleMessage(conn.peer, msg);
   }
 
@@ -284,10 +307,61 @@ const BuzzerHost = (function () {
   function handleClose(peerId) {
     connections.delete(peerId);
     msgTimes.delete(peerId);
+    lastHeard.delete(peerId);
+    stalePeers.delete(peerId);
     const result = window.BuzzerProtocol.roomReduce(roomState, { type: "leave", peerId });
     roomState = result.next;
     applyEffects(result.effects);
     renderAll();
+  }
+
+  /* ============ Heartbeat + broker resilience (spec §9.3, §9.5) ============ */
+
+  function markHeard(peerId) {
+    lastHeard.set(peerId, Date.now());
+    if (stalePeers.delete(peerId)) renderAll(); // a silent phone spoke again → 🟢
+  }
+
+  // Flag connected players silent past HOST_STALE_MS as 🔴 (spec §9.3) — status
+  // only, no roster removal; re-render only on a real change so a host mid-typing a
+  // Final wager isn't disrupted every tick.
+  function sweepLiveness() {
+    const net = window.BuzzerNet;
+    if (!net) return;
+    const now = Date.now();
+    let changed = false;
+    for (const id of Object.keys(roomState.players)) {
+      const stale = roomState.players[id].connected && net.isStaleAt(lastHeard.get(id), now, net.HOST_STALE_MS);
+      if (stale === stalePeers.has(id)) continue;
+      if (stale) stalePeers.add(id); else stalePeers.delete(id);
+      changed = true;
+    }
+    if (changed) renderAll();
+  }
+
+  // Broker drop (disconnected event or post-open network error): keep P2P alive and
+  // re-signal with capped backoff (spec §9.5); success re-fires open → brokerRecovered.
+  function onBrokerDisconnected() {
+    if (!peer || peer.destroyed || roomStatus !== "open" || brokerTimer) return;
+    if (peer.open) return brokerRecovered();
+    if (brokerRetries >= MAX_BROKER_RETRIES) {
+      if (brokerStatus !== "lost") { brokerStatus = "lost"; renderAll(); }
+      return;
+    }
+    if (brokerStatus !== "reconnecting") { brokerStatus = "reconnecting"; renderAll(); }
+    const delay = Math.min(BROKER_BASE_MS * 2 ** brokerRetries++, BROKER_MAX_MS);
+    brokerTimer = setTimeout(() => {
+      brokerTimer = null;
+      try { if (peer && peer.disconnected && typeof peer.reconnect === "function") peer.reconnect(); }
+      catch (err) { console.warn("Buzzer broker reconnect failed:", err); }
+    }, delay);
+  }
+
+  function brokerRecovered() {
+    if (brokerTimer) clearTimeout(brokerTimer);
+    brokerTimer = null;
+    brokerRetries = 0;
+    if (brokerStatus !== "ok") { brokerStatus = "ok"; renderAll(); }
   }
 
   /* ============ Effect application ============ */
@@ -476,6 +550,8 @@ const BuzzerHost = (function () {
     box.appendChild(buildCodeBlock());
     box.appendChild(buildJoinLine());
     box.appendChild(buildPlayerList());
+    const broker = window.BuzzerNet ? window.BuzzerNet.brokerLabel(brokerStatus) : "";
+    if (broker) box.appendChild(el("p", "buzzer-broker", broker));
     box.appendChild(buildRoomControls());
     return box;
   }
@@ -508,7 +584,9 @@ const BuzzerHost = (function () {
   function buildPlayerRow(peerId) {
     const player = roomState.players[peerId];
     const li = el("li", "buzzer-player-row");
-    li.appendChild(el("span", "buzzer-dot", player.connected ? "🟢" : "🔴"));
+    // 🔴 for a dropped OR live-but-silent-past-30s connection (spec §9.3) — honest status.
+    const down = !player.connected || stalePeers.has(peerId);
+    li.appendChild(el("span", "buzzer-dot", down ? "🔴" : "🟢"));
     li.appendChild(el("span", "buzzer-player-name", player.name));
     const kickBtn = el("button", "buzzer-kick", "Kick");
     kickBtn.type = "button";
@@ -539,7 +617,7 @@ const BuzzerHost = (function () {
     const visible = onBoard && roomStatus === "open";
     show(chip, visible);
     if (!visible) return;
-    chip.textContent = `${roomCode} · ${connectedCount()} 🔔`;
+    chip.textContent = `${roomCode} · ${connectedCount()} 🔔${brokerStatus === "ok" ? "" : " · ⚠"}`;
     chip.setAttribute("aria-label", `Buzzer room ${roomCode}, ${connectedCount()} connected. Toggle details`);
   }
 
@@ -705,6 +783,8 @@ const BuzzerHost = (function () {
     _roomState: () => roomState,
     // Transport seam for the wagers module: send one message to a peer id.
     _send: (peerId, msg) => sendTo(peerId, msg),
+    // Harness seam (I4): silence pong replies to exercise the player staleness path.
+    _suppressPong: (v) => { suppressPong = !!v; return api; },
   };
 
   if (document.readyState === "loading") {
