@@ -144,7 +144,19 @@ function validateCategory(cat, c, fail) {
     if (typeof clue.answer !== "string" || !clue.answer.trim()) {
       fail(`${at} needs a non-empty "answer".`);
     }
+    validateImageField(clue.image, `${at} "image"`, fail);
+    validateImageField(clue.answerImage, `${at} "answerImage"`, fail);
+    if (clue.imageAlt !== undefined && typeof clue.imageAlt !== "string") {
+      fail(`${at} "imageAlt" must be a string.`);
+    }
   });
+}
+
+/** Validate an optional photo-clue image field through the media gate (§10.2). */
+function validateImageField(value, label, fail) {
+  if (value === undefined) return;
+  const res = window.Media?.validateImageRef(value);
+  if (res && !res.valid) fail(`${label} — ${res.error}`);
 }
 
 function validateFinal(fj, fail) {
@@ -154,6 +166,10 @@ function validateFinal(fj, fail) {
     if (typeof fj[key] !== "string" || !fj[key].trim()) {
       fail(`"finalJeopardy" needs a non-empty "${key}".`);
     }
+  }
+  validateImageField(fj.image, '"finalJeopardy" "image"', fail);
+  if (fj.imageAlt !== undefined && typeof fj.imageAlt !== "string") {
+    fail('"finalJeopardy" "imageAlt" must be a string.');
   }
 }
 
@@ -487,6 +503,11 @@ function renderClueModal() {
   $("clue-text").textContent = clue.clue;
   $("answer-text").textContent = clue.answer;
 
+  // Photo clue (§10.3): image shows with the clue — for a Daily Double only
+  // after the wager locks; the answer image only once the answer is revealed.
+  window.Media?.mountClueImage($("clue-image"), awaitingWager ? undefined : clue.image, clue.imageAlt);
+  window.Media?.mountClueImage($("answer-image"), active.revealed ? clue.answerImage : undefined, "Answer image");
+
   if (awaitingWager) renderDailyDoubleForm();
   if (active.revealed) renderJudgeRow();
 }
@@ -734,6 +755,9 @@ function lockFinalWagers() {
 function renderFinalClue(body, stage) {
   const fj = state.game.finalJeopardy;
   body.appendChild(el("p", "final-category", fj.category));
+  // Final Jeopardy photo clue (§10.3): with the clue, never in the wager stage.
+  const fjImg = window.Media?.buildValidatedImage(fj.image, fj.imageAlt);
+  if (fjImg) body.appendChild(fjImg);
   body.appendChild(el("p", "final-clue", fj.clue));
 
   if (stage === "clue") {

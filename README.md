@@ -94,9 +94,33 @@ Rules:
 | `clues[].clue` | yes | What the host reads aloud |
 | `clues[].answer` | yes | Revealed when the host clicks "Reveal Answer" |
 | `clues[].dailyDouble` | no | `true` turns the tile into a Daily Double |
+| `clues[].image` | no | Photo question — shown above the clue text (see below) |
+| `clues[].imageAlt` | no | Screen-reader description of the clue image |
+| `clues[].answerImage` | no | Second image revealed with the answer |
 | `finalJeopardy` | no | Omit it entirely to skip the final round |
+| `finalJeopardy.image` | no | Image shown with the final clue (never during wagers) |
 
 Categories don't need the same number of clues — uneven columns are fine.
+
+### Photo questions
+
+Any clue (and Final Jeopardy) can carry an image. Two ways to add one:
+
+- **In the editor** — each clue has a 📷 control: paste an image URL, or
+  **Choose file…** to embed a photo straight into the JSON (it's downscaled
+  and compressed in your browser, so the downloaded `questions.json` is
+  fully self-contained — no image hosting needed). An "embedded images"
+  meter warns you before browser storage limits become a problem; prefer
+  URL images for image-heavy boards.
+- **In the JSON** — set `image` to an `https://` URL, a repo-relative path
+  (e.g. `images/mystery.jpg` committed next to `index.html`), or a
+  `data:image/...` URI.
+
+Board tiles stay classic dollar amounts; the image appears when the clue
+opens (for Daily Doubles, after the wager is locked). Buzzer phones don't
+receive images — players look at the host screen. Note: images loaded from
+external URLs reveal viewers' IP addresses to that host, as with any web
+image; embedded or repo-hosted images don't.
 
 > **Tip:** after editing `questions.json`, also update `js/data.js` if you want
 > the same questions when opening `index.html` directly from disk (it's the

@@ -45,9 +45,31 @@ function blankDraft() {
 function saveDraft() {
   try {
     localStorage.setItem(EDITOR_KEY, JSON.stringify(editorDraft));
+    setSaveWarning("");
   } catch (err) {
     console.warn("Could not save editor draft:", err);
+    // Quota is the usual culprit once photos are embedded — say so visibly
+    // instead of only logging (spec §10.4).
+    setSaveWarning(
+      "Draft too large to auto-save in this browser — usually embedded images. " +
+      "Download JSON to keep your work, or remove large images / use image URLs instead."
+    );
   }
+}
+
+function setSaveWarning(msg) {
+  const el = $("editor-save-warning");
+  if (el) el.textContent = msg || "";
+}
+
+/** Save the draft and refresh the embedded-image meter after any image edit. */
+function onDraftChange() {
+  saveDraft();
+  renderImageMeter();
+}
+
+function renderImageMeter() {
+  window.EditorMedia?.renderMeter(editorDraft, $("editor-image-meter"));
 }
 
 function loadDraft() {
@@ -96,10 +118,19 @@ function cleanDraft() {
   out.categories.forEach((cat) => {
     cat.clues.forEach((clue) => {
       if (!clue.dailyDouble) delete clue.dailyDouble;
+      pruneImageFields(clue);
     });
   });
+  if (out.finalJeopardy) pruneImageFields(out.finalJeopardy);
   if (!out.finalJeopardy) delete out.finalJeopardy;
   return out;
+}
+
+/** Drop blank image fields so games without photos round-trip byte-for-byte. */
+function pruneImageFields(obj) {
+  for (const key of ["image", "answerImage", "imageAlt"]) {
+    if (typeof obj[key] !== "string" || !obj[key].trim()) delete obj[key];
+  }
 }
 
 function validateDraft() {
@@ -156,6 +187,7 @@ function renderEditor() {
   renderEditorCategories();
   renderEditorFinal();
   $("btn-add-category").disabled = editorDraft.categories.length >= MAX_CATEGORIES;
+  renderImageMeter();
 }
 
 function renderEditorCategories() {
@@ -281,7 +313,29 @@ function buildClueRow(cat, clue, r) {
     renderEditor();
   });
   row.appendChild(remove);
-  return row;
+
+  // Wrap the value/clue/answer/DD grid row with its collapsible photo controls
+  // (spec §10.4) so each clue can carry a clue image and an answer-reveal image.
+  const cell = el("div", "editor-clue-cell");
+  cell.appendChild(row);
+  cell.appendChild(buildClueMedia(clue, r));
+  return cell;
+}
+
+/** Collapsible per-clue image controls: clue image + answer-reveal image. */
+function buildClueMedia(clue, r) {
+  const details = el("details", "editor-clue-media");
+  if (clue.image || clue.answerImage) details.open = true;
+  details.appendChild(el("summary", "editor-clue-media-summary", `📷 Clue ${r + 1} images`));
+  if (window.EditorMedia) {
+    details.appendChild(window.EditorMedia.buildImageControl({
+      model: clue, imgKey: "image", altKey: "imageAlt", label: "Clue image", onChange: onDraftChange,
+    }));
+    details.appendChild(window.EditorMedia.buildImageControl({
+      model: clue, imgKey: "answerImage", altKey: null, label: "Answer-reveal image", onChange: onDraftChange,
+    }));
+  }
+  return details;
 }
 
 function renderEditorFinal() {
@@ -292,6 +346,15 @@ function renderEditorFinal() {
   $("editor-final-category").value = editorDraft.finalJeopardy.category || "";
   $("editor-final-clue").value = editorDraft.finalJeopardy.clue || "";
   $("editor-final-answer").value = editorDraft.finalJeopardy.answer || "";
+
+  const media = $("editor-final-media");
+  media.replaceChildren();
+  if (window.EditorMedia) {
+    media.appendChild(window.EditorMedia.buildImageControl({
+      model: editorDraft.finalJeopardy, imgKey: "image", altKey: "imageAlt",
+      label: "Final Jeopardy image", onChange: onDraftChange,
+    }));
+  }
 }
 
 /* ============ Event wiring ============ */

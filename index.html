@@ -10,6 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/styles.css">
   <link rel="stylesheet" href="css/buzzer.css">
+  <link rel="stylesheet" href="css/media.css">
 </head>
 <body>
 
@@ -95,6 +96,9 @@
         in this browser.
       </p>
 
+      <p id="editor-image-meter" class="editor-image-meter">Embedded images: ~0 B</p>
+      <p id="editor-save-warning" class="error-msg" role="alert"></p>
+
       <label class="editor-field editor-game-title">Game title
         <input id="editor-title" type="text" maxlength="80" autocomplete="off">
       </label>
@@ -123,6 +127,8 @@
           <label class="editor-field">Answer
             <input id="editor-final-answer" type="text" autocomplete="off">
           </label>
+          <!-- Final Jeopardy photo clue controls; filled by editor.js via editor-media.js -->
+          <div id="editor-final-media" class="editor-final-media"></div>
         </div>
       </fieldset>
 
@@ -153,8 +159,12 @@
         </div>
       </div>
 
+      <!-- Photo-clue image (§10); populated by app.js via media.js, gated by validateImageRef -->
+      <div id="clue-image" class="clue-image-wrap hidden"></div>
+
       <p id="clue-text" class="clue-text hidden"></p>
       <p id="answer-text" class="answer-text hidden"></p>
+      <div id="answer-image" class="clue-image-wrap hidden"></div>
 
       <!-- Host buzz bar (regular clues only); filled by buzzer-host.js -->
       <div id="buzzer-clue-bar" class="buzzer-clue-bar hidden"></div>
@@ -233,12 +243,14 @@
   </section>
 
   <script src="js/data.js"></script>
+  <script src="js/media.js"></script>
   <script src="js/buzzer-protocol.js"></script>
   <script src="js/buzzer-net.js"></script>
   <script src="js/buzzer-player.js"></script>
   <script src="js/app.js"></script>
   <script src="js/buzzer-host.js"></script>
   <script src="js/buzzer-wagers.js"></script>
+  <script src="js/editor-media.js"></script>
   <script src="js/editor.js"></script>
 </body>
 </html>

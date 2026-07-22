@@ -594,7 +594,101 @@ The buzz must fire on `pointerdown` (finger contact), not `click` (release)
   hold (heartbeat must not break arbitration, wagers, or reading-phase
   timing).
 
-## 10. README
+## 10. Photo clues (images in questions)
+
+Let hosts build photo questions: a clue can show an image ("Who is this?"),
+the answer reveal can show one too, and Final Jeopardy can carry one. Board
+tiles stay classic dollar amounts (no thumbnails). **Phones never receive
+images** — the host screen/projector shows them; players look up. Zero
+protocol changes; buzzer files untouched.
+
+### 10.1 Data format (additive, backward compatible)
+
+```json
+{ "value": 400, "clue": "Who is this?", "answer": "Who is X?",
+  "image": "images/mystery.jpg", "imageAlt": "A rugby player mid-kick",
+  "answerImage": "https://…/reveal.jpg" }
+```
+- `image` (optional string): shown with the clue. Accepts an https URL, a
+  relative repo path, or a `data:image/*` URI (embedded).
+- `answerImage` (optional): shown only once the answer is revealed.
+- `imageAlt` (optional): screen-reader description; default "Clue image".
+- `finalJeopardy.image` / `finalJeopardy.imageAlt`: same, shown with the
+  final clue.
+- Games without these fields behave byte-for-byte as today.
+
+### 10.2 Validation (security-critical) — MUST
+
+One shared gate `validateImageRef(str)` in a NEW small UMD module
+`js/media.js` (Node-testable like buzzer-net), used by `validateGame` AND
+the editor:
+- Must be a non-empty string ≤ 2,000,000 chars.
+- Scheme allowlist ONLY: `https:`, `http:`, `data:image/*` (MIME prefix
+  actually checked), or a relative path (no scheme, and NOT
+  protocol-relative `//`). Everything else rejected with a clear
+  per-field error (`javascript:`, `data:text/html`, `file:`, `blob:`, …).
+- SVG data URIs are acceptable: as an `<img>` src, SVG scripts/handlers do
+  not execute (SVG-as-image is inert).
+- Rendering builds `img` elements programmatically (`el`-style, src +
+  alt only) — the no-innerHTML rule stands; `onerror` on the img swaps in a
+  textContent "⚠ image failed to load" note instead of a broken icon.
+
+### 10.3 Rendering — MUST
+
+- Clue modal: image above the clue text, `max-height ~55vh`, `max-width
+  100%`, object-fit contain, centered, rounded — clue text stays visible on
+  a projector. `decoding="async"`. Daily Double: image appears only after
+  the wager locks (with the clue, as usual). Answer reveal appends
+  `answerImage` if present. Final modal: `finalJeopardy.image` with the
+  final clue (never during the wager stage).
+- app.js stays lean: rendering + validation live in `js/media.js`
+  (`buildClueImage(src, alt)`, `validateImageRef`); app.js only gains small
+  call sites in `validateGame`/`renderClueModal`/`renderFinalClue`. New
+  styles in a NEW `css/media.css` (styles.css is over the size cap and
+  stays untouched). Static image containers may be added to index.html's
+  clue/final cards.
+
+### 10.4 Editor support — MUST
+
+`js/editor.js` is now in scope (first feature to touch it — read it fully
+first; keep its existing draft/validation patterns; if additions push it
+past 800 lines, split image UI into `js/editor-media.js` and flag it).
+
+- Per-clue "📷 Image" controls: paste-URL input, "Choose file…" button, alt
+  text input, thumbnail preview, Remove. Same controls for the answer image
+  and for Final Jeopardy.
+- "Choose file…" embeds: draw to canvas, downscale to max 1024px long edge,
+  export JPEG quality 0.75, store as `data:image/jpeg` URI in the draft.
+  Show the resulting size ("~120 KB").
+- A running "embedded images: ~N MB" meter; warn above ~2.5 MB total that
+  auto-save/localStorage may fail and suggest URL images instead. If a
+  draft save throws (quota), surface a visible one-line warning in the
+  editor (no more silent console.warn for this path).
+- Editor validation mirrors `validateImageRef` with inline per-field
+  errors; Download JSON round-trips images (download → re-upload → valid,
+  images intact).
+
+### 10.5 Verification additions (Part B)
+
+- **U21** (unit, Node): `validateImageRef` — accepts https/relative/
+  `data:image/*` (incl. svg+xml), rejects `javascript:`, `data:text/html`,
+  `file:`, `blob:`, protocol-relative `//`, non-strings, empty, and
+  over-length; boundary at the length cap.
+- **E22** (live): author a photo question in the editor via BOTH paths
+  (pasted URL + embedded file — generate a canvas image in-page for the
+  file path), Use in game → tile looks classic → clue modal shows the
+  image → reveal shows the answer image → FJ shows its image (wager stage
+  does not) → Download JSON → re-upload → images survive. Bad inputs
+  (`javascript:` URL, `data:text/html`) rejected inline in the editor AND
+  by `validateGame` on upload — and never reach any `img.src`. Broken-URL
+  image shows the failed-to-load note, not a broken icon.
+- **R11** (regression): image-less games render byte-for-byte as today
+  (default game unchanged); buzzer flows untouched (zero diff to buzzer
+  files); mid-clue refresh of an embedded-image game restores from
+  localStorage; `data.js`/`questions.json` untouched; app.js growth ≤ ~25
+  lines (call sites only).
+
+## 11. README
 
 Add a "Buzzer rooms (optional)" section: what it is, how to host/join, that it
 needs internet (PeerJS public broker for signaling, then peer-to-peer WebRTC),

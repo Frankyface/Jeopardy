@@ -1,0 +1,173 @@
+/* ============================================================
+   Jeopardy — photo-clue styles (spec §10.3)
+   Linked after styles.css + buzzer.css; reuses their :root tokens
+   (--gold, --blue-*, --ink, --radius, fonts). Kept out of styles.css
+   because it is already over the 800-line house cap. Covers both the
+   projected clue/answer/Final images and the question-editor image
+   controls. No animation, so no prefers-reduced-motion block needed.
+   ============================================================ */
+
+/* ============ Clue / answer / Final images (game render) ============ */
+
+.clue-image-wrap {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  margin: 0.4rem 0 1rem;
+}
+
+/* The image itself — centered, contained, rounded, on the navy stage. Capped
+   at ~55vh so the clue text below stays visible on a projector. */
+.clue-image {
+  display: block;
+  max-width: 100%;
+  max-height: 55vh;
+  object-fit: contain;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 204, 77, 0.35);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  background: rgba(1, 1, 23, 0.45);
+}
+
+/* Final modal image sits inside a dynamically built body; center it and give
+   a slightly smaller cap so the wager/clue text keeps room. */
+.final-body .clue-image {
+  margin: 0.2rem auto 0.4rem;
+  max-height: 46vh;
+}
+
+/* onerror swap-in (built by media.js buildClueImage) — a plain-text note, no
+   broken-image icon. */
+.clue-image-failed {
+  margin: 0.6rem 0 1rem;
+  padding: 0.6rem 1rem;
+  text-align: center;
+  color: var(--ink-dim);
+  font-weight: 600;
+  border: 1px dashed rgba(170, 176, 224, 0.4);
+  border-radius: var(--radius);
+}
+
+/* ============ Editor: per-clue photo controls ============ */
+
+.editor-clue-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.editor-clue-media {
+  border: 1px solid rgba(170, 176, 224, 0.2);
+  border-radius: 8px;
+  background: rgba(6, 12, 233, 0.1);
+  padding: 0.15rem 0.6rem;
+}
+
+.editor-clue-media-summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  padding: 0.3rem 0;
+  user-select: none;
+}
+
+.editor-clue-media-summary:hover { color: var(--gold-text); }
+.editor-clue-media[open] .editor-clue-media-summary { color: var(--gold-text); }
+
+.editor-media-control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem 0 0.7rem;
+  border-top: 1px solid rgba(170, 176, 224, 0.14);
+}
+.editor-media-control:first-of-type { border-top: none; }
+
+.editor-media-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.editor-media-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.editor-media-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.editor-media-url {
+  flex: 1;
+  min-width: 180px;
+}
+
+.editor-media-choose { flex: 0 0 auto; }
+
+.editor-media-alt {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+  color: var(--ink-dim);
+}
+
+.editor-media-feedback {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  min-height: 0;
+}
+
+.editor-media-thumb {
+  max-height: 84px;
+  max-width: 150px;
+  object-fit: contain;
+  border-radius: 6px;
+  border: 1px solid rgba(170, 176, 224, 0.35);
+  background: rgba(1, 1, 23, 0.4);
+}
+
+.editor-media-size {
+  font-size: 0.76rem;
+  color: var(--ink-dim);
+}
+
+.editor-media-error {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--red);
+}
+
+/* ============ Editor: embedded-size meter + Final controls ============ */
+
+.editor-image-meter {
+  margin: 0.2rem 0 0.4rem;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
+.editor-image-meter.warn {
+  color: #2b1d00;
+  background: linear-gradient(180deg, var(--gold) 0%, var(--gold-deep) 100%);
+  padding: 0.4rem 0.7rem;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.editor-final-media {
+  border: 1px solid rgba(170, 176, 224, 0.2);
+  border-radius: 8px;
+  background: rgba(6, 12, 233, 0.1);
+  padding: 0.2rem 0.7rem 0.4rem;
+}
