@@ -30,10 +30,6 @@ const BuzzerHost = (function () {
   const BEEP_HZ = 880;
   const BEEP_MS = 150;
   const HOTKEY_DEBOUNCE_MS = 300; // Space arm/disarm debounce.
-  // Broker-reconnect backoff (spec §9.5): capped exponential retries; P2P survives a blip.
-  const MAX_BROKER_RETRIES = 8;
-  const BROKER_BASE_MS = 1000;
-  const BROKER_MAX_MS = 15000;
 
   /* ============ Module state (never serialised) ============ */
 
@@ -60,8 +56,17 @@ const BuzzerHost = (function () {
   const lastHeard = new Map(); // peerId → ms of the last inbound message
   const stalePeers = new Set(); // peers silent past HOST_STALE_MS (🔴 overlay; no removal)
   let heartbeatTimer = null, suppressPong = false; // suppressPong: harness seam (I4)
-  let brokerStatus = "ok"; // "ok" | "reconnecting" | "lost"
-  let brokerRetries = 0, brokerTimer = null;
+  let openDeadline = null, openTries = 0; // §9.7 whole-phase open deadline; fresh Peer per try
+
+  // Broker reconnect (spec §9.5) is an injected-effects controller in BuzzerNet so
+  // this file stays under the 800-line cap; behaviour unchanged (null → BuzzerNet
+  // absent, reconnect skipped like every other resilience feature).
+  const broker = window.BuzzerNet && window.BuzzerNet.createBrokerController
+    ? window.BuzzerNet.createBrokerController({
+        getPeer: () => peer, isRoomOpen: () => roomStatus === "open", onStatusChange: () => renderAll(),
+      })
+    : null;
+  function brokerStatusNow() { return broker ? broker.status() : "ok"; }
 
   /* ============ App-global bridges (defensive) ============ */
 
@@ -127,15 +132,33 @@ const BuzzerHost = (function () {
 
   /* ============ Room lifecycle ============ */
 
-  function openRoom(code) {
-    if (roomStatus === "connecting" || roomStatus === "open") return;
+  function openRoom(code, retry) {
+    if (!retry && (roomStatus === "connecting" || roomStatus === "open")) return;
+    openTries = retry ? openTries + 1 : 1;
     roomStatus = "connecting";
     roomError = null;
+    armOpenDeadline(code);
     renderAll();
     const ready = customPeerFactory ? Promise.resolve() : loadPeerJs();
     ready
       .then(() => startPeer(code || window.BuzzerProtocol.generateRoomCode()))
       .catch((err) => failRoom("Couldn't load the buzzer library — check your internet.", err));
+  }
+
+  // §9.7: ONE whole-phase deadline (library load + broker registration) from Open —
+  // a hung 101/pending socket fires neither "open" nor "error", so the panel would
+  // sit on "Opening room…" forever. On expiry: fresh Peer + one auto-retry, then a
+  // visible error. Late fires after open/close/fail are no-ops (the status guard).
+  function armOpenDeadline(code) {
+    clearTimeout(openDeadline);
+    const net = window.BuzzerNet;
+    openDeadline = setTimeout(() => {
+      openDeadline = null;
+      if (roomStatus !== "connecting") return;
+      destroyPeer();
+      if (openTries < (net ? net.HOST_OPEN_ATTEMPTS : 2)) openRoom(code, true);
+      else failRoom("Couldn't reach the buzzer server — check your internet and try again.");
+    }, net ? net.JOIN_DEADLINE_MS : 12000);
   }
 
   function startPeer(code) {
@@ -148,6 +171,7 @@ const BuzzerHost = (function () {
     }
     peer = instance;
     peer.on("open", () => {
+      clearTimeout(openDeadline); openDeadline = null; // whole-phase deadline met (§9.7)
       roomCode = code;
       roomStatus = "open";
       roomError = null;
@@ -230,10 +254,9 @@ const BuzzerHost = (function () {
     peer = null;
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = null;
-    if (brokerTimer) clearTimeout(brokerTimer);
-    brokerTimer = null;
-    brokerStatus = "ok";
-    brokerRetries = 0;
+    clearTimeout(openDeadline);
+    openDeadline = null;
+    if (broker) broker.reset();
   }
 
   /* ============ Connections & inbound messages ============ */
@@ -339,30 +362,12 @@ const BuzzerHost = (function () {
     if (changed) renderAll();
   }
 
-  // Broker drop (disconnected event or post-open network error): keep P2P alive and
-  // re-signal with capped backoff (spec §9.5); success re-fires open → brokerRecovered.
-  function onBrokerDisconnected() {
-    if (!peer || peer.destroyed || roomStatus !== "open" || brokerTimer) return;
-    if (peer.open) return brokerRecovered();
-    if (brokerRetries >= MAX_BROKER_RETRIES) {
-      if (brokerStatus !== "lost") { brokerStatus = "lost"; renderAll(); }
-      return;
-    }
-    if (brokerStatus !== "reconnecting") { brokerStatus = "reconnecting"; renderAll(); }
-    const delay = Math.min(BROKER_BASE_MS * 2 ** brokerRetries++, BROKER_MAX_MS);
-    brokerTimer = setTimeout(() => {
-      brokerTimer = null;
-      try { if (peer && peer.disconnected && typeof peer.reconnect === "function") peer.reconnect(); }
-      catch (err) { console.warn("Buzzer broker reconnect failed:", err); }
-    }, delay);
-  }
-
-  function brokerRecovered() {
-    if (brokerTimer) clearTimeout(brokerTimer);
-    brokerTimer = null;
-    brokerRetries = 0;
-    if (brokerStatus !== "ok") { brokerStatus = "ok"; renderAll(); }
-  }
+  // Broker reconnect + recovery delegate to the BuzzerNet controller (spec §9.5):
+  // capped-backoff re-signal while P2P survives a blip. Both call sites (peer
+  // "disconnected", post-open network error, and the startPeer "open" handler) keep
+  // these names so the wiring is untouched.
+  function onBrokerDisconnected() { if (broker) broker.onDisconnected(); }
+  function brokerRecovered() { if (broker) broker.recovered(); }
 
   /* ============ Effect application ============ */
 
@@ -418,12 +423,8 @@ const BuzzerHost = (function () {
 
   /* ============ Host-driven buzzer actions ============ */
 
-  function arm() {
-    dispatch({ type: "arm" });
-  }
-  function disarm() {
-    dispatch({ type: "disarm" });
-  }
+  function arm() { dispatch({ type: "arm" }); }
+  function disarm() { dispatch({ type: "disarm" }); }
   function dispatch(event) {
     if (roomStatus !== "open") return;
     const result = window.BuzzerProtocol.roomReduce(roomState, event);
@@ -441,9 +442,7 @@ const BuzzerHost = (function () {
 
   /* ============ Hooks called from app.js ============ */
 
-  function onRender() {
-    renderAll();
-  }
+  function onRender() { renderAll(); }
   function onClueOpened() {
     // A regular clue with a live audience opens the reading window (phones → RED
     // "Wait for it…"); a Daily Double (or no connected players) just resets to
@@ -459,12 +458,8 @@ const BuzzerHost = (function () {
     // Ends the buzzable window entirely: phones → idle (not back to reading).
     dispatch({ type: "answerRevealed" });
   }
-  function onClueClosed() {
-    dispatch({ type: "clueReset" });
-  }
-  function onJudgedWrong(playerId) {
-    dispatch({ type: "judgedWrong", playerId });
-  }
+  function onClueClosed() { dispatch({ type: "clueReset" }); }
+  function onJudgedWrong(playerId) { dispatch({ type: "judgedWrong", playerId }); }
 
   /* ============ Sound + haptics ============ */
 
@@ -550,8 +545,8 @@ const BuzzerHost = (function () {
     box.appendChild(buildCodeBlock());
     box.appendChild(buildJoinLine());
     box.appendChild(buildPlayerList());
-    const broker = window.BuzzerNet ? window.BuzzerNet.brokerLabel(brokerStatus) : "";
-    if (broker) box.appendChild(el("p", "buzzer-broker", broker));
+    const brokerMsg = window.BuzzerNet ? window.BuzzerNet.brokerLabel(brokerStatusNow()) : "";
+    if (brokerMsg) box.appendChild(el("p", "buzzer-broker", brokerMsg));
     box.appendChild(buildRoomControls());
     return box;
   }
@@ -617,7 +612,7 @@ const BuzzerHost = (function () {
     const visible = onBoard && roomStatus === "open";
     show(chip, visible);
     if (!visible) return;
-    chip.textContent = `${roomCode} · ${connectedCount()} 🔔${brokerStatus === "ok" ? "" : " · ⚠"}`;
+    chip.textContent = `${roomCode} · ${connectedCount()} 🔔${brokerStatusNow() === "ok" ? "" : " · ⚠"}`;
     chip.setAttribute("aria-label", `Buzzer room ${roomCode}, ${connectedCount()} connected. Toggle details`);
   }
 

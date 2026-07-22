@@ -512,7 +512,69 @@ with capped retries + backoff and reflect broker state in the room panel/chip
 that survived (P2P is independent of the broker once established) must keep
 working during a broker blip — do not tear the room down.
 
-### 9.6 Verification additions (Part B)
+### 9.7 Broker-phase hang protection ("101 pending") — MUST
+
+Field report: on some devices the WebSocket upgrade to the PeerJS broker
+shows 101/(pending) and hangs forever — neither `open` nor `error` fires, so
+the §9.2 data-channel timeout never engages and the player sits on
+"Connecting…" indefinitely ("won't load").
+
+- The player-side connect timeout MUST cover the **entire join attempt** —
+  PeerJS script load, broker registration (`peer.on("open")`), AND the
+  DataConnection open — one ~12 s deadline from the moment Join is pressed
+  (replacing/absorbing the §9.2 data-channel-only timer).
+- On deadline: tear down the whole peer (a hung socket is unrecoverable —
+  always build a fresh `Peer`), count it as a connectivity failure (§9.4
+  tips), and **auto-retry up to 2 more times** with a visible attempt
+  counter ("Connecting… attempt 2 of 3") before resting on the error + tips
+  (the player can always tap Join again).
+- Host side: opening a room gets the same whole-phase deadline ("Couldn't
+  reach the buzzer server") with one automatic retry; status stays visible
+  in the panel, never a silent hang.
+- Implementer MUST check the current PeerJS docs for any official alternate
+  cloud endpoint worth falling back to; if none exists (likely), do NOT
+  invent one — retries with fresh sockets are the mitigation, and the
+  self-host/metered upgrade note in `buzzer-net.js` covers the rest.
+
+### 9.8 Buzz on press, not release — MUST
+
+The buzz must fire on `pointerdown` (finger contact), not `click` (release)
+— releases cost 50-100 ms of reaction time and feel mushy on a real buzzer.
+
+- Listen on `pointerdown` (primary) with `touchstart` fallback for browsers
+  without Pointer Events; call `preventDefault()` where needed to suppress
+  the synthetic click/ghost-click that follows.
+- **No double-fire**: a `click` that follows a handled press (same
+  interaction, ≤ 500 ms latch) is ignored. One press = at most one buzz
+  message.
+- **Keyboard stays first-class**: a keyboard-driven `click` (Enter/Space on
+  the focused button, no preceding pointer event) must still buzz — switch
+  and keyboard users keep working.
+- Applies to BOTH the armed buzz and the reading-phase early tap (the trap
+  triggers on contact too — consistent physics). Wager/answer form buttons
+  stay ordinary clicks.
+
+### 9.9 Verification additions for §9.7-9.8 (Part B)
+
+- **U20** (unit): pure press-latch helper (press marks the latch; a click
+  within the latch window is a duplicate; a bare click with no latch is
+  keyboard and fires; injected clock) and broker-attempt bookkeeping
+  (attempt counter / deadline decision under an injected clock).
+- **I5** (harness): dispatching `pointerdown` on the buzz button sends the
+  buzz WITHOUT any `pointerup`/`click`; a following synthetic `click` sends
+  nothing; a bare programmatic `click` (keyboard path) still buzzes; the
+  early-tap trap also fires on `pointerdown` alone.
+- **E21** (live): with an armed buzzer, `pointerdown` alone wins the buzz
+  (host banner appears before any release is dispatched); no duplicate buzz
+  arrives when the release/click follows. Join-attempt counter text appears
+  when the broker phase is artificially stalled (seam/patch documented), and
+  the whole-phase deadline fires a retry with a fresh peer.
+- **R10** (regression): keyboard-activated buzz still works; exactly one
+  buzz per press across pointer+click sequences; wager/answer submits
+  unaffected; §9.4 tips appear after 2 stalled-broker attempts (not after
+  wrong-code rejections); all prior states hold.
+
+### 9.10 Verification additions for §9.1-9.5 (Part B)
 
 - **U19** (unit): `validateMessage` accepts `ping`/`pong`; liveness
   bookkeeping helpers (last-heard tracking / staleness decision) are pure and

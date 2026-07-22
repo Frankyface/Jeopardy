@@ -393,6 +393,11 @@ body.player-mode {
   text-align: center;
   padding: 1rem;
   cursor: pointer;
+  /* §9.8: buzz fires on pointerdown. Kill the double-tap-zoom / 300ms tap delay and
+     stray text selection so contact registers instantly and feels like a real buzzer. */
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
   color: var(--ink-dim);
   background: radial-gradient(circle at 50% 38%, #131c66 0%, #070b34 70%);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), inset 0 0 40px rgba(0, 0, 0, 0.35);

@@ -637,3 +637,133 @@ test("U19 validateMessage accepts ping/pong; BuzzerNet liveness helpers are pure
   assert.equal(BN.detectInAppBrowser(""), null);
   assert.equal(BN.detectInAppBrowser(null), null);
 });
+
+/* ============ U20 — press-latch decision helper (spec §9.8/§9.9) ============ */
+
+test("U20 press-latch: press→click within window = duplicate; bare click fires; window expiry", () => {
+  const W = BN.PRESS_LATCH_MS; // 500
+  const fresh = BN.createPressLatch();
+  assert.deepEqual(fresh, { pressedAt: null });
+
+  // A bare click with no preceding press is a keyboard / assistive-tech activation
+  // → NOT a ghost → it must buzz.
+  assert.equal(BN.isGhostClick(fresh, 1000, W), false);
+
+  // A press stamps the latch immutably.
+  const latched = BN.markPress(fresh, 1000);
+  assert.deepEqual(latched, { pressedAt: 1000 });
+  assert.deepEqual(fresh, { pressedAt: null }); // input untouched (pure)
+
+  // The synthetic click the browser fires for the same interaction = duplicate.
+  assert.equal(BN.isGhostClick(latched, 1000, W), true); // same instant
+  assert.equal(BN.isGhostClick(latched, 1000 + W, W), true); // at the window edge
+  // Window expiry: a click just past the latch window is a fresh (keyboard) click.
+  assert.equal(BN.isGhostClick(latched, 1000 + W + 1, W), false);
+
+  // Junk latches are treated as "no press" → fires.
+  assert.equal(BN.isGhostClick(null, 1000, W), false);
+  assert.equal(BN.isGhostClick({ pressedAt: NaN }, 1000, W), false);
+  assert.equal(BN.isGhostClick(undefined, 1000, W), false);
+});
+
+/* ============ U20 — broker-attempt bookkeeping (spec §9.7/§9.9) ============ */
+
+test("U20 join-attempt bookkeeping: counter, whole-phase deadline, retry budget, label", () => {
+  const D = BN.JOIN_DEADLINE_MS; // 12000
+  const MAX = BN.JOIN_MAX_ATTEMPTS; // 3
+
+  let a = BN.createJoinAttempts();
+  assert.deepEqual(a, { attempt: 0, startedAt: null });
+  assert.equal(BN.joinExpired(a, 999999, D), false); // never started → not expired
+  assert.equal(BN.canRetryJoin(a, MAX), true);
+
+  // Attempt 1 begins at t=1000 (immutably — input untouched).
+  const a1 = BN.beginAttempt(a, 1000);
+  assert.deepEqual(a1, { attempt: 1, startedAt: 1000 });
+  assert.deepEqual(a, { attempt: 0, startedAt: null });
+  assert.equal(BN.attemptLabel(a1, MAX), "Connecting… attempt 1 of 3");
+
+  // Deadline boundary under an injected clock: fresh one ms before D, expired AT D.
+  assert.equal(BN.joinExpired(a1, 1000 + D - 1, D), false);
+  assert.equal(BN.joinExpired(a1, 1000 + D, D), true);
+
+  // Attempts 2 then 3; the retry budget runs out after the 3rd.
+  const a2 = BN.beginAttempt(a1, 20000);
+  const a3 = BN.beginAttempt(a2, 40000);
+  assert.equal(a2.attempt, 2);
+  assert.equal(a3.attempt, 3);
+  assert.equal(BN.attemptLabel(a3, MAX), "Connecting… attempt 3 of 3");
+  assert.equal(BN.canRetryJoin(a1, MAX), true); // 1 < 3
+  assert.equal(BN.canRetryJoin(a2, MAX), true); // 2 < 3
+  assert.equal(BN.canRetryJoin(a3, MAX), false); // 3 !< 3 → rest on error + tips
+});
+
+/* ============ Broker-reconnect controller — extraction verification (spec §9.5) ============ */
+
+test("broker controller: backoff schedule, cap, lost after max, recover resets (fake timer)", () => {
+  // Pure backoff first: doubles from base, capped at maxMs.
+  assert.equal(BN.brokerBackoffMs(0, 1000, 4000), 1000);
+  assert.equal(BN.brokerBackoffMs(1, 1000, 4000), 2000);
+  assert.equal(BN.brokerBackoffMs(2, 1000, 4000), 4000);
+  assert.equal(BN.brokerBackoffMs(5, 1000, 4000), 4000); // capped
+
+  // Injected fake timer captures the scheduled callback + delay without firing it.
+  let scheduled = null;
+  const setTimer = (fn, ms) => { scheduled = { fn, ms }; return { id: 1 }; };
+  const clearTimer = () => {};
+  const peer = {
+    destroyed: false, open: false, disconnected: true,
+    reconnectCalls: 0, reconnect() { this.reconnectCalls += 1; },
+  };
+  const statuses = [];
+  const ctrl = BN.createBrokerController({
+    getPeer: () => peer,
+    isRoomOpen: () => true,
+    onStatusChange: (s) => statuses.push(s),
+    maxRetries: 3, baseMs: 1000, maxMs: 4000,
+    setTimer, clearTimer,
+  });
+  assert.equal(ctrl.status(), "ok");
+
+  // First drop → reconnecting, scheduled at the base delay; firing it reconnects.
+  ctrl.onDisconnected();
+  assert.equal(ctrl.status(), "reconnecting");
+  assert.deepEqual(statuses, ["reconnecting"]);
+  assert.equal(scheduled.ms, 1000);
+  scheduled.fn();
+  assert.equal(peer.reconnectCalls, 1);
+
+  // Subsequent drops back off 2000 → 4000 (cap); each fires a reconnect.
+  ctrl.onDisconnected(); assert.equal(scheduled.ms, 2000); scheduled.fn();
+  ctrl.onDisconnected(); assert.equal(scheduled.ms, 4000); scheduled.fn();
+  assert.equal(peer.reconnectCalls, 3);
+
+  // Budget spent (retries == maxRetries) → "lost", nothing scheduled.
+  scheduled = null;
+  ctrl.onDisconnected();
+  assert.equal(ctrl.status(), "lost");
+  assert.equal(scheduled, null);
+
+  // recovered() → "ok" and resets retries; a later drop backs off from base again.
+  ctrl.recovered();
+  assert.equal(ctrl.status(), "ok");
+  ctrl.onDisconnected();
+  assert.equal(scheduled.ms, 1000);
+  assert.equal(ctrl.status(), "reconnecting");
+
+  // A peer already .open short-circuits straight to recovered (no schedule).
+  ctrl.recovered();
+  peer.open = true;
+  scheduled = null;
+  ctrl.onDisconnected();
+  assert.equal(ctrl.status(), "ok");
+  assert.equal(scheduled, null);
+
+  // Room not open → a drop is a complete no-op (P2P independent of the broker).
+  const ctrl2 = BN.createBrokerController({
+    getPeer: () => peer, isRoomOpen: () => false, onStatusChange: () => {}, setTimer, clearTimer,
+  });
+  scheduled = null;
+  ctrl2.onDisconnected();
+  assert.equal(scheduled, null);
+});

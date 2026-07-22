@@ -20,13 +20,17 @@
   </style>
 </head>
 <body>
-  <h1>Buzzer loopback harness — scenarios I1 + I2 + I3 + I4</h1>
+  <h1>Buzzer loopback harness — scenarios I1 + I2 + I3 + I4 + I5</h1>
   <p id="summary">Running…</p>
   <ul id="results"></ul>
 
   <!-- Pure core -->
   <script src="../js/buzzer-protocol.js"></script>
   <script src="../js/buzzer-net.js"></script>
+  <!-- Player glue: in non-player mode (no ?room) its boot() no-ops, but it still
+       exposes the window.BuzzerPlayer test seam I5 uses to drive the real buzz
+       press/click wiring. Loaded after protocol + net (which it reads at eval). -->
+  <script src="../js/buzzer-player.js"></script>
 
   <!-- Minimal app-global shims so the real host glue can run headless.
        Defined BEFORE buzzer-host.js so its boot() finds them. No buzzer
@@ -438,6 +442,52 @@
         check("I4 no uncaught errors during scenario", uncaught === null);
       }
 
+      /* ---- scenario I5 — buzz on press, not release (§9.8) ---- */
+      async function runI5() {
+        check("I5 BuzzerPlayer seam present", !!(window.BuzzerPlayer && window.BuzzerPlayer._wireBuzz));
+
+        // Open a regular clue so the room is in the reading trap; Bo (p2, still
+        // connected from I1/I2) is our subject.
+        window.state = Object.assign({}, window.state, {
+          active: { isDailyDouble: false, revealed: false, cat: 0, row: 0 }, final: null,
+        });
+        BuzzerHost.onClueOpened();
+        check("I5 clue open → Bo in the reading trap", p2.ui.mode === "reading");
+
+        // Wire a REAL buzz button (the production press/click wiring) whose buzz
+        // action sends over Bo's loopback conn — the exact path minus the phone DOM.
+        const btn = document.createElement("button");
+        document.body.appendChild(btn);
+        let sends = 0;
+        window.BuzzerPlayer._wireBuzz(btn, () => { sends += 1; p2.conn.send({ v: 1, t: "buzz" }); });
+
+        // pointerdown ALONE (no pointerup/click) sends the buzz, and the reading-phase
+        // early-tap trap fires on that contact — Bo is early-locked.
+        const pressType = window.PointerEvent ? "pointerdown" : "touchstart";
+        btn.dispatchEvent(new Event(pressType, { bubbles: true, cancelable: true }));
+        check("I5 pointerdown alone sends the buzz", sends === 1);
+        check("I5 early-tap trap fires on pointerdown alone (Bo early-locked)",
+          p2.ui.mode === "locked" && p2.ui.lockReason === "early");
+
+        // The synthetic click for the same interaction sends nothing (ghost swallowed).
+        btn.dispatchEvent(new Event("click", { bubbles: true, cancelable: true }));
+        check("I5 following synthetic click sends nothing (one press = one buzz)", sends === 1);
+
+        // A bare programmatic click on a FRESH button (keyboard / assistive-tech path,
+        // no preceding press) still buzzes.
+        const kbBtn = document.createElement("button");
+        document.body.appendChild(kbBtn);
+        let kbSends = 0;
+        window.BuzzerPlayer._wireBuzz(kbBtn, () => { kbSends += 1; });
+        kbBtn.dispatchEvent(new Event("click", { bubbles: true, cancelable: true }));
+        check("I5 bare programmatic click still buzzes (keyboard path)", kbSends === 1);
+
+        BuzzerHost.onClueClosed(); // leave the board clean
+        btn.remove();
+        kbBtn.remove();
+        check("I5 no uncaught errors during scenario", uncaught === null);
+      }
+
       function renderResults() {
         const list = document.getElementById("results");
         let passed = 0;
@@ -465,6 +515,7 @@
           .then(runI2)
           .then(runI3)
           .then(runI4)
+          .then(runI5)
           .catch((err) => { check("scenario ran without throwing: " + err.message, false); })
           .finally(renderResults);
       if (document.readyState === "complete") start();

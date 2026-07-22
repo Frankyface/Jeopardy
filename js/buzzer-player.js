@@ -49,8 +49,10 @@
   let connLive = false;
   let wantConnected = false;
   let reconnectTimer = null;
-  // Connection-resilience timers + counters (spec §9.2–9.4).
-  let connectTimer = null; // 15s connect deadline
+  // Connection-resilience timers + counters (spec §9.2–9.4, §9.7).
+  let joinDeadline = null; // §9.7 whole-phase join deadline (load + peer open + channel)
+  let joinAttempts = { attempt: 0, startedAt: null }; // §9.7 attempt bookkeeping
+  let everConnected = false; // has a channel opened this session? (reconnect vs first join)
   let pingTimer = null; // 10s ping cadence
   let livenessTimer = null; // staleness poll
   let probeTimer = null; // visibility-probe deadline
@@ -131,17 +133,49 @@
     code = rawCode;
     playerName = rawName.slice(0, NAME_MAX);
     wantConnected = true;
+    joinAttempts = NET.createJoinAttempts(); // fresh §9.7 attempt sequence
     connect();
   }
 
   function connect() {
+    // §9.7: begin an attempt and arm ONE deadline covering the WHOLE join — script
+    // load, broker registration (peer "open"), AND the data channel. A hung
+    // 101/pending broker socket fires neither "open" nor "error", so without this
+    // whole-phase deadline nothing downstream would ever time out.
+    joinAttempts = NET.beginAttempt(joinAttempts, Date.now());
     connecting = true;
     setNotice("");
+    armJoinDeadline();
     render();
-    loadPeerJs().then(openPeer).catch(() => {
-      noteFailure();
-      onConnectFail("Can't reach the buzzer server. Check your internet.");
-    });
+    loadPeerJs().then(openPeer).catch(() => attemptFailed("Can't reach the buzzer server. Check your internet.", false));
+  }
+
+  function armJoinDeadline() {
+    clearTimeout(joinDeadline);
+    joinDeadline = setTimeout(onJoinDeadline, NET.JOIN_DEADLINE_MS);
+  }
+
+  function onJoinDeadline() {
+    joinDeadline = null;
+    if (connLive) return; // the channel opened in time — nothing to do
+    attemptFailed("Couldn't reach the buzzer server. Tap Join to try again.", false);
+  }
+
+  // Single "this attempt failed" path (§9.7). A wrong CODE (peer-unavailable) is a
+  // hard stop — not a connectivity failure, so no §9.4 tip counter and no retry. A
+  // failure AFTER we were once connected hands back to the §9.3 reconnect loop.
+  // Otherwise (first-join connectivity failure) auto-retry up to JOIN_MAX_ATTEMPTS,
+  // then rest on the error + tips (the player can always tap Join again).
+  function attemptFailed(message, wrongCode) {
+    clearTimeout(joinDeadline);
+    joinDeadline = null;
+    connecting = false;
+    teardownPeer();
+    if (wrongCode) { onConnectFail(message); return; }
+    if (everConnected) { dropped(); return; }
+    noteFailure();
+    if (NET.canRetryJoin(joinAttempts, NET.JOIN_MAX_ATTEMPTS)) connect();
+    else onConnectFail(message);
   }
 
   function openPeer() {
@@ -152,8 +186,8 @@
       const opts = NET && NET.PEER_OPTIONS;
       peer = opts ? new window.peerjs.Peer(undefined, opts) : new window.peerjs.Peer();
     } catch (err) {
-      onConnectFail("This browser can't use buzzers.");
       console.warn("Buzzer player peer error:", err);
+      attemptFailed("This browser can't use buzzers.", true);
       return;
     }
     peer.on("open", () => openConnection());
@@ -165,21 +199,20 @@
     try {
       conn = peer.connect(PEER_PREFIX + code, { serialization: "json", metadata: { name: playerName } });
     } catch (err) {
-      noteFailure();
-      onConnectFail("Couldn't reach that room.");
       console.warn("Buzzer player connect error:", err);
+      attemptFailed("Couldn't reach that room.", false);
       return;
     }
-    // §9.2: if the data channel doesn't open within 15s (ICE hung), tear it down
-    // and let the retry/guidance flow take over instead of "Connecting…" forever.
-    clearTimeout(connectTimer);
-    connectTimer = setTimeout(onConnectTimeout, NET.CONNECT_TIMEOUT_MS);
+    // The whole-phase deadline (§9.7, armed in connect) already covers the data
+    // channel, so there is no separate §9.2 data-channel timer to arm here.
     conn.on("open", () => {
       connecting = false;
       connLive = true;
+      everConnected = true;
       failCount = 0; // a clean connection resets the failure guidance (§9.4)
-      clearTimeout(connectTimer);
-      connectTimer = null;
+      clearTimeout(joinDeadline);
+      joinDeadline = null;
+      joinAttempts = NET.createJoinAttempts(); // later drops use the §9.3 loop, not §9.7
       cancelReconnect();
       startHeartbeat();
       safeSend({ v: 1, t: "join", name: playerName });
@@ -216,18 +249,19 @@
 
   function handlePeerError(err) {
     const type = err && err.type;
+    // A wrong CODE is a hard stop, NOT a connectivity failure (no §9.4 tips, no
+    // retry). Network/socket errors during a join ARE connectivity failures → the
+    // attempt path retries (first join) or hands off to the reconnect loop (§9.3).
     if (type === "peer-unavailable") {
-      onConnectFail("No room with that code — check with the host.");
+      attemptFailed("No room with that code — check with the host.", true);
       return;
     }
     if (type === "network" || type === "server-error" || type === "socket-error" || type === "socket-closed") {
-      noteFailure();
-      onConnectFail("Can't reach the buzzer server. Retrying…");
-      dropped();
+      attemptFailed("Can't reach the buzzer server.", false);
       return;
     }
     if (type === "browser-incompatible") {
-      onConnectFail("This browser can't use buzzers.");
+      attemptFailed("This browser can't use buzzers.", true);
       return;
     }
     console.warn("Buzzer player peer error:", err);
@@ -301,15 +335,6 @@
     dropped(); // → "Reconnecting…" UI + the existing reconnect loop
   }
 
-  function onConnectTimeout() {
-    connectTimer = null;
-    if (connLive) return; // the data channel opened in time — nothing to do
-    teardownPeer();
-    noteFailure();
-    onConnectFail("Couldn't open the buzzer connection. Trying again…");
-    if (wantConnected) scheduleReconnect();
-  }
-
   // A connectivity failure (timeout / network / load) — NOT a wrong code — bumps the
   // counter that expands the join-screen tips after two in a row (§9.4).
   function noteFailure() {
@@ -319,7 +344,11 @@
   function leave() {
     wantConnected = false;
     connLive = false;
+    everConnected = false;
     sent = false;
+    clearTimeout(joinDeadline);
+    joinDeadline = null;
+    joinAttempts = NET.createJoinAttempts();
     cancelReconnect();
     releaseWakeLock();
     teardownPeer();
@@ -327,10 +356,11 @@
     render();
   }
 
+  // NOTE: teardownPeer does NOT touch joinDeadline — the whole-phase deadline is a
+  // join-attempt concern owned by connect()/attemptFailed(), and openPeer() calls
+  // teardownPeer() while that deadline is deliberately still armed (spec §9.7).
   function teardownPeer() {
     stopHeartbeat();
-    if (connectTimer) clearTimeout(connectTimer);
-    connectTimer = null;
     try {
       if (conn && typeof conn.close === "function") conn.close();
     } catch (err) {
@@ -359,6 +389,39 @@
     // are disabled buttons, so they never reach here.
     if (!PRESSABLE.has(ui.mode)) return;
     safeSend({ v: 1, t: "buzz" });
+  }
+
+  /* ============ Buzz on press, not release (spec §9.8) ============ */
+
+  // The buzz fires on CONTACT (pointerdown, or touchstart where Pointer Events are
+  // unavailable), not on click/release — a release costs 50–100 ms of reaction time
+  // and feels mushy. preventDefault suppresses the synthetic ghost click that
+  // follows; the shared BuzzerNet press-latch swallows that ghost so one press = one
+  // buzz, while a bare click with NO preceding press (keyboard Enter/Space, assistive
+  // tech) still buzzes. Fires in BOTH armed and reading modes — sendBuzz gates the
+  // mode, so the reading-phase early tap triggers on contact too (consistent physics).
+  function makeBuzzHandlers(buzz, clock) {
+    const nowFn = clock || Date.now;
+    let latch = NET.createPressLatch();
+    return {
+      press(event) {
+        if (event && typeof event.preventDefault === "function") event.preventDefault();
+        latch = NET.markPress(latch, nowFn());
+        buzz();
+      },
+      click(event) {
+        if (NET.isGhostClick(latch, nowFn(), NET.PRESS_LATCH_MS)) return; // ghost of a handled press
+        buzz(); // bare click = keyboard / assistive-tech activation
+      },
+    };
+  }
+
+  function wireBuzz(button, buzz, clock) {
+    const h = makeBuzzHandlers(buzz, clock);
+    if (window.PointerEvent) button.addEventListener("pointerdown", h.press);
+    else button.addEventListener("touchstart", h.press, { passive: false });
+    button.addEventListener("click", h.click);
+    return h;
   }
 
   function submitWager() {
@@ -464,7 +527,9 @@
     const btn = $$("player-join-btn");
     if (btn) {
       btn.disabled = connecting;
-      btn.textContent = connecting ? "Connecting…" : "Join";
+      // §9.7: while connecting, show the visible attempt counter ("Connecting…
+      // attempt N of 3") so a stalled broker phase never looks like a dead button.
+      btn.textContent = connecting ? NET.attemptLabel(joinAttempts, NET.JOIN_MAX_ATTEMPTS) : "Join";
     }
     renderJoinExtras();
   }
@@ -612,7 +677,7 @@
       });
     }
     const buzzBtn = $$("player-buzz");
-    if (buzzBtn) buzzBtn.addEventListener("click", sendBuzz);
+    if (buzzBtn) wireBuzz(buzzBtn, sendBuzz); // §9.8: press (pointerdown/touchstart), not release
     const leaveBtn = $$("player-leave");
     if (leaveBtn) leaveBtn.addEventListener("click", leave);
 
@@ -649,6 +714,11 @@
     wireEvents();
     render();
   }
+
+  // Test seam (mirrors BuzzerHost's _init): lets tests/harness.html drive the real
+  // buzz press/click wiring against a fake button + injected clock, without booting
+  // the whole player. Production code never reads this.
+  window.BuzzerPlayer = { _wireBuzz: wireBuzz, _makeBuzzHandlers: makeBuzzHandlers };
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);
