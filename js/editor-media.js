@@ -75,10 +75,78 @@
 
   /* ============ Canvas downscale + embed (spec §10.4) ============ */
 
+  const HEIC_RE = /\.(heic|heif)$/i;
+
+  /** iPhone HEIC/HEIF, which most browsers can't decode. @returns {boolean} */
+  function looksHeic(file) {
+    const type = (file && file.type) || "";
+    return type === "image/heic" || type === "image/heif" || (!!file && HEIC_RE.test(file.name || ""));
+  }
+
+  /**
+   * True when the drawn canvas is a single uniform color — the signature of a
+   * `drawImage` that silently did nothing (mobile Safari's out-of-memory
+   * failure on a large photo, which otherwise embeds a blank frame). Because
+   * drawImage always covers the whole canvas when it succeeds, the only way the
+   * result is perfectly uniform is a no-op draw, which leaves either the white
+   * fill (white readback) OR a corrupted all-black frame — this catches both.
+   * ANY real image varies pixel-to-pixel, so a small logo/subject on white is
+   * NOT a false positive; only a genuinely solid-color (degenerate) image is
+   * rejected, and the host is better off re-choosing it. Full scan with an
+   * early exit on the first varying pixel (instant for real images). One
+   * `getImageData` — can throw on a tainted canvas (never here, same-origin
+   * file/bitmap) so we fail safe to false.
+   * @returns {boolean}
+   */
+  function isBlankDraw(ctx, w, h) {
+    try {
+      const data = ctx.getImageData(0, 0, w, h).data;
+      if (data.length < 8) return false; // 1px canvas — nothing to compare
+      const r0 = data[0];
+      const g0 = data[1];
+      const b0 = data[2];
+      for (let i = 4; i < data.length; i += 4) {
+        if (Math.abs(data[i] - r0) > 4 || Math.abs(data[i + 1] - g0) > 4 || Math.abs(data[i + 2] - b0) > 4) {
+          return false; // real pixel-to-pixel variation → a genuine image
+        }
+      }
+      return true; // perfectly uniform → drawImage was a no-op
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /**
+   * Draw a decoded source (ImageBitmap or <img>) downscaled onto a canvas and
+   * return a JPEG data URI — or null if the draw came back blank. Paints an
+   * OPAQUE WHITE background FIRST: JPEG has no alpha, so without it every
+   * transparent pixel (a PNG cut-out, a logo) would encode as BLACK — the core
+   * "just shows black photos" bug. @returns {string|null}
+   */
+  function encodeToJpeg(source, srcW, srcH) {
+    const scale = Math.min(1, MAX_EMBED_DIM / (Math.max(srcW, srcH) || 1));
+    const w = Math.max(1, Math.round(srcW * scale));
+    const h = Math.max(1, Math.round(srcH * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("no canvas 2d context");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(source, 0, 0, w, h);
+    if (isBlankDraw(ctx, w, h)) return null;
+    return canvas.toDataURL("image/jpeg", EMBED_QUALITY);
+  }
+
   /**
    * Read an image file, downscale it to at most MAX_EMBED_DIM on its long edge,
-   * and re-encode as a JPEG data URI (quality EMBED_QUALITY). All async work is
-   * funnelled through the two callbacks — no globals mutated here.
+   * and re-encode as a JPEG data URI (quality EMBED_QUALITY). Decodes via
+   * `createImageBitmap` when available — it is memory-efficient for the 12–48 MP
+   * phone photos that make mobile Safari hand back a blank canvas, and
+   * `imageOrientation:"from-image"` keeps EXIF-rotated photos upright — and
+   * falls back to a FileReader + <img> decode. All async work funnels through
+   * the two callbacks; no globals mutated here.
    * @param {File} file
    * @param {(dataUrl:string)=>void} onDone
    * @param {(message:string)=>void} onError
@@ -86,32 +154,63 @@
   function downscaleImageFile(file, onDone, onError) {
     const fail = (m) => { if (onError) onError(m); };
     if (!file || typeof file.type !== "string" || !/^image\//.test(file.type)) {
+      if (looksHeic(file)) {
+        fail("iPhone HEIC photos aren’t supported by browsers. Set the camera to “Most Compatible” (JPEG), screenshot the photo, or paste an image URL instead.");
+        return;
+      }
       fail("Please choose an image file.");
       return;
     }
+    const finish = (source, w, h, close) => {
+      let dataUrl = null;
+      try {
+        dataUrl = encodeToJpeg(source, w, h);
+      } catch (err) {
+        if (typeof console !== "undefined") console.warn("Image embed failed:", err);
+        if (close) close();
+        fail("Could not embed that image.");
+        return;
+      }
+      if (close) close();
+      if (dataUrl === null) {
+        fail("That image came out blank — it may be too large for this device to process. Try a different or smaller photo, or paste an image URL instead.");
+        return;
+      }
+      onDone(dataUrl);
+    };
+    // Two-arg then(onFulfilled, onRejected): the reject handler fires ONLY when
+    // createImageBitmap itself rejects — NOT when finish()/onDone throws — so a
+    // downstream throw (e.g. a localStorage quota error in the save-draft step)
+    // can't re-trigger the fallback and fire the callbacks twice. The try/catch
+    // guards a synchronous throw from an engine that dislikes the options dict.
+    let bitmapPromise = null;
+    if (typeof createImageBitmap === "function") {
+      try {
+        bitmapPromise = createImageBitmap(file, { imageOrientation: "from-image" });
+      } catch (err) {
+        bitmapPromise = null;
+      }
+    }
+    if (bitmapPromise) {
+      bitmapPromise.then(
+        (bmp) => finish(bmp, bmp.width, bmp.height, () => { if (bmp.close) bmp.close(); }),
+        () => decodeViaImageElement(file, finish, fail)
+      );
+      return;
+    }
+    decodeViaImageElement(file, finish, fail);
+  }
+
+  /** FileReader + <img> decode fallback (no createImageBitmap, or it rejected). */
+  function decodeViaImageElement(file, finish, fail) {
     const reader = new FileReader();
     reader.onerror = () => fail("Could not read that file.");
     reader.onload = () => {
       const img = new Image();
-      img.onerror = () => fail("That image could not be decoded.");
-      img.onload = () => {
-        const longEdge = Math.max(img.naturalWidth, img.naturalHeight) || 1;
-        const scale = Math.min(1, MAX_EMBED_DIM / longEdge);
-        const w = Math.max(1, Math.round(img.naturalWidth * scale));
-        const h = Math.max(1, Math.round(img.naturalHeight * scale));
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) { fail("Could not embed that image (no canvas support)."); return; }
-        ctx.drawImage(img, 0, 0, w, h);
-        try {
-          onDone(canvas.toDataURL("image/jpeg", EMBED_QUALITY));
-        } catch (err) {
-          if (typeof console !== "undefined") console.warn("Image embed failed:", err);
-          fail("Could not embed that image.");
-        }
-      };
+      img.onerror = () => fail(looksHeic(file)
+        ? "iPhone HEIC photos aren’t supported by browsers. Use a JPEG/PNG, or paste an image URL instead."
+        : "That image could not be decoded.");
+      img.onload = () => finish(img, img.naturalWidth, img.naturalHeight, null);
       img.src = String(reader.result);
     };
     reader.readAsDataURL(file);

@@ -122,6 +122,12 @@ receive images — players look at the host screen. Note: images loaded from
 external URLs reveal viewers' IP addresses to that host, as with any web
 image; embedded or repo-hosted images don't.
 
+**Troubleshooting embeds:** transparent PNGs are flattened onto a white
+background (JPEG has no transparency). Very large phone photos or HEIC files
+(iPhone's default) may not embed on every device — if you see an error, use a
+smaller JPEG/PNG or paste an image URL. iPhone: set the camera to Settings →
+Camera → Formats → **Most Compatible** to shoot JPEGs.
+
 > **Tip:** after editing `questions.json`, also update `js/data.js` if you want
 > the same questions when opening `index.html` directly from disk (it's the
 > fallback used when the JSON can't be fetched). On GitHub Pages only
