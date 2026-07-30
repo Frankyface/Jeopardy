@@ -27,6 +27,11 @@
   <!-- Host buzzer-room popover (board screen); filled by buzzer-host.js -->
   <div id="buzzer-popover" class="buzzer-popover hidden" role="dialog" aria-label="Buzzer room"></div>
 
+  <!-- Shown by app.js when this browser refuses to save the game (usually its
+       storage is full of embedded photos). Silent failure here used to make a
+       refresh quietly revert to an older game — i.e. photos vanishing. -->
+  <p id="save-warning" class="save-warning hidden" role="alert"></p>
+
   <main>
     <!-- ===== Setup screen ===== -->
     <section id="screen-setup" class="screen screen-setup">

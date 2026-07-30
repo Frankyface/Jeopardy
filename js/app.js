@@ -60,9 +60,27 @@ function setState(patch) {
 function saveState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    setGameSaveWarning("");
   } catch (err) {
     console.warn("Could not save game state:", err);
+    // Never fail silently: an unsaved game still plays, but a refresh would
+    // restore the last state that DID save — which looks exactly like the
+    // photos disappearing. Embedded photos are the usual reason storage fills.
+    setGameSaveWarning(
+      "⚠ This browser can’t save your game — its storage is full, usually from embedded photos. " +
+      "The game still works, but do NOT refresh or close this tab: it would revert to an earlier game. " +
+      "Open the Question Editor and use Download JSON to keep a copy, and prefer pasted image URLs over embedded files for big photos."
+    );
   }
+}
+
+/** Show (or clear) the persistent "can't save" banner. Named apart from
+    editor.js's setSaveWarning — both are globals and editor.js loads last. */
+function setGameSaveWarning(msg) {
+  const node = $("save-warning");
+  if (!node) return;
+  node.textContent = msg || "";
+  show(node, !!msg);
 }
 
 function loadSavedState() {

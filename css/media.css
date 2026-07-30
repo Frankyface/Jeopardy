@@ -149,6 +149,23 @@
   color: var(--red);
 }
 
+/* ============ "Can't save this game" banner (app.js saveState) ============ */
+
+/* Sits under the topbar, above every screen, so the host cannot miss that their
+   game — photos included — is not being persisted. */
+.save-warning {
+  margin: 0 auto 0.6rem;
+  max-width: 68rem;
+  padding: 0.65rem 1rem;
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--gold) 0%, var(--gold-deep) 100%);
+  color: #2b1d00;
+  font-weight: 700;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
 /* ============ Editor: embedded-size meter + Final controls ============ */
 
 .editor-image-meter {
