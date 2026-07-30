@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Photo-clue harness (P1–P14)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #04062b; color: #f4f5ff; margin: 0; padding: 2rem; }
+    h1 { font-size: 1.2rem; }
+    #summary { font-weight: 700; margin: 0.6rem 0 1rem; }
+    #summary.ok { color: #51d88a; }
+    #summary.bad { color: #ff6b6b; }
+    #results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+    #results li { padding: 0.4rem 0.7rem; border-radius: 8px; background: rgba(255,255,255,0.05); }
+    #results li[data-pass="true"] { border-left: 4px solid #51d88a; }
+    #results li[data-pass="false"] { border-left: 4px solid #ff6b6b; background: rgba(255,107,107,0.12); }
+    .tag { font-weight: 700; margin-right: 0.5rem; }
+    li[data-pass="true"] .tag { color: #51d88a; }
+    li[data-pass="false"] .tag { color: #ff6b6b; }
+    .detail { display: block; opacity: 0.75; font-size: 0.82rem; margin-top: 0.15rem; }
+    #app { width: 1024px; height: 700px; border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; background: #000; }
+    .stage { margin-top: 1.4rem; }
+  </style>
+</head>
+<body>
+  <h1>Photo-clue harness — success states P1–P14 (spec §10)</h1>
+  <p id="summary">Running…</p>
+  <ul id="results"></ul>
+
+  <!-- The REAL app under test. Same origin, so the harness can drive its DOM
+       and call its globals exactly as a host would click them. -->
+  <div class="stage"><iframe id="app" title="app under test"></iframe></div>
+
+  <script>
+  (function () {
+    "use strict";
+
+    /* ============ Result plumbing ============ */
+
+    const results = [];
+    let uncaught = null;
+    window.addEventListener("error", (e) => { uncaught = e.message; });
+    window.addEventListener("unhandledrejection", (e) => { uncaught = String(e.reason); });
+
+    function check(label, cond, detail) {
+      results.push({ label, pass: !!cond, detail: detail === undefined ? "" : String(detail) });
+    }
+
+    function report() {
+      const list = document.getElementById("results");
+      list.replaceChildren();
+      for (const r of results) {
+        const li = document.createElement("li");
+        li.dataset.pass = String(r.pass);
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = r.pass ? "PASS" : "FAIL";
+        li.appendChild(tag);
+        li.appendChild(document.createTextNode(r.label));
+        if (r.detail) {
+          const d = document.createElement("span");
+          d.className = "detail";
+          d.textContent = r.detail;
+          li.appendChild(d);
+        }
+        list.appendChild(li);
+      }
+      const failed = results.filter((r) => !r.pass).length;
+      const summary = document.getElementById("summary");
+      const ok = failed === 0 && !uncaught;
+      summary.className = ok ? "ok" : "bad";
+      summary.textContent = ok
+        ? `All ${results.length} photo-clue checks passed.`
+        : `${failed} of ${results.length} checks FAILED${uncaught ? ` — uncaught: ${uncaught}` : ""}`;
+      // Machine-readable result for the automation driving this page.
+      window.__PHOTO_HARNESS__ = { total: results.length, failed, uncaught, results };
+    }
+
+    /* ============ Async helpers ============ */
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    async function waitFor(fn, label, timeout) {
+      const limit = timeout || 4000;
+      const start = Date.now();
+      for (;;) {
+        let value = null;
+        try { value = fn(); } catch (err) { value = null; }
+        if (value) return value;
+        if (Date.now() - start > limit) throw new Error(`timed out waiting for ${label}`);
+        await sleep(40);
+      }
+    }
+
+    /* ============ The app under test ============ */
+
+    const frame = document.getElementById("app");
+    const W = () => frame.contentWindow;
+    const D = () => frame.contentDocument;
+    const $ = (id) => D().getElementById(id);
+    /** Read a script-scoped `let` (state, editorDraft) that is not a window prop. */
+    const gv = (expr) => W().eval(expr);
+
+    const STORAGE_KEYS = ["gh-jeopardy-state-v1", "gh-jeopardy-editor-v1"];
+
+    /* The iframe loads index.html and its scripts through the normal HTTP cache,
+       so an edited app.js can silently keep serving the OLD file and the run
+       would report on code that is no longer on disk. Re-fetch every asset with
+       `cache: "reload"` once per run to refresh those cache entries first. */
+    const APP_ASSETS = [
+      "../js/app.js", "../js/media.js", "../js/data.js",
+      "../js/editor.js", "../js/editor-media.js", "../js/buzzer-protocol.js",
+      "../js/buzzer-net.js", "../js/buzzer-player.js", "../js/buzzer-host.js",
+      "../js/buzzer-wagers.js", "../css/styles.css", "../css/buzzer.css", "../css/media.css",
+    ];
+
+    async function refreshAppAssets() {
+      await Promise.all(APP_ASSETS.map((u) => fetch(u, { cache: "reload" })));
+    }
+
+    /* Load the app into the iframe. Each distinct src (?harness=1, ?game=…) is
+       its OWN cache entry, so re-fetch that exact URL before pointing the frame
+       at it — otherwise a stale index.html loads next to a fresh app.js. */
+    async function loadFrame(src) {
+      await fetch(src, { cache: "reload" });
+      await new Promise((resolve) => {
+        frame.onload = resolve;
+        frame.src = src;
+      });
+    }
+
+    /** Boot (or re-boot) the app with a clean slate and wait until it has a game. */
+    async function bootApp(clearStorage) {
+      if (clearStorage !== false) STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+      await loadFrame("../index.html?harness=1");
+      await waitFor(() => gv("typeof state !== 'undefined' && state.game"), "app boot");
+      // Guard against a stale cached bundle silently invalidating the whole run.
+      if (typeof W().setGameSaveWarning !== "function") {
+        throw new Error("app under test is stale (setGameSaveWarning missing) — cache not refreshed");
+      }
+      // Never let a stray confirm()/prompt() stall the run.
+      W().confirm = () => true;
+      W().prompt = () => null;
+    }
+
+    /* ============ Fixtures ============ */
+
+    let bigPhotoFile = null;      // 3000×2000 JPEG — the "real phone photo" case
+    let transparentFile = null;   // PNG with alpha — the "goes black" case
+
+    /** Build a File inside the APP's realm so its input accepts it natively. */
+    async function loadFixture(path, name, type) {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(`fixture ${path} → HTTP ${res.status}`);
+      const buf = await res.arrayBuffer();
+      return new (W().File)([buf], name, { type });
+    }
+
+    /** Put a File on a hidden file input and fire the change the UI listens for. */
+    function pickFile(control, file) {
+      const input = control.querySelector('input[type="file"]');
+      const dt = new (W().DataTransfer)();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new (W().Event)("change", { bubbles: true }));
+    }
+
+    function typeInto(input, value) {
+      input.value = value;
+      input.dispatchEvent(new (W().Event)("input", { bubbles: true }));
+    }
+
+    /* ============ Pixel probes ============ */
+
+    /** Average + corner/center pixels of a loaded <img>. Detects black flattening. */
+    function probePixels(img) {
+      const c = D().createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      let sum = 0;
+      let minV = 255;
+      let maxV = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const v = (d[i] + d[i + 1] + d[i + 2]) / 3;
+        sum += v;
+        if (v < minV) minV = v;
+        if (v > maxV) maxV = v;
+      }
+      const at = (x, y) => {
+        const i = (y * c.width + x) * 4;
+        return [d[i], d[i + 1], d[i + 2]];
+      };
+      return {
+        avg: Math.round(sum / (d.length / 4)),
+        min: Math.round(minV),
+        max: Math.round(maxV),
+        topLeft: at(0, 0),
+        center: at(c.width >> 1, c.height >> 1),
+      };
+    }
+
+    /** Decode a data URI / URL into a loaded <img> in the app realm. */
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const img = new (W().Image)();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("decode failed"));
+        img.src = src;
+      });
+    }
+
+    /* ============ Test game (render-path scenarios) ============ */
+
+    const BROKEN_URL = "https://127.0.0.1:9/definitely-not-here.png";
+
+    function testGame(photo) {
+      return {
+        title: "Photo harness game",
+        categories: [
+          {
+            name: "Photos",
+            clues: [
+              { value: 200, clue: "Regular photo clue.", answer: "Answer 1",
+                image: photo, imageAlt: "Harness clue photo",
+                answerImage: "tests/fixtures/transparent-logo.png" },
+              { value: 400, clue: "Daily Double photo clue.", answer: "Answer 2",
+                dailyDouble: true, image: photo, imageAlt: "Harness DD photo" },
+              { value: 600, clue: "Broken image clue.", answer: "Answer 3", image: BROKEN_URL },
+              { value: 800, clue: "No photo here.", answer: "Answer 4" },
+            ],
+          },
+        ],
+        finalJeopardy: {
+          category: "Final Photos", clue: "Final photo clue.", answer: "Final answer",
+          image: photo, imageAlt: "Harness final photo",
+        },
+      };
+    }
+
+    /** Author `game` through the real editor path, then start a game with 1 player. */
+    async function loadGameAndStart(game) {
+      W().openEditor();
+      W().resetDraft(JSON.parse(JSON.stringify(game)));
+      W().useDraftInGame();
+      await waitFor(() => gv("state.game && state.game.title") === game.title, "game loaded");
+      if (gv("state.players.length") === 0) {
+        const nameInput = $("player-name-input");
+        typeInto(nameInput, "Harness");
+        nameInput.form.requestSubmit();
+        await waitFor(() => gv("state.players.length") === 1, "player added");
+      }
+      $("btn-start").click();
+      await waitFor(() => gv("state.phase") === "board", "board phase");
+    }
+
+    /** Click the real board tile for (cat,row) — same path a host clicks. */
+    async function openTile(cat, row) {
+      const tiles = D().querySelectorAll("#board button");
+      const clue = gv(`state.game.categories[${cat}].clues[${row}]`);
+      const label = new RegExp(`for \\$${clue.value}\\b`);
+      const tile = Array.from(tiles).find((b) => label.test(b.getAttribute("aria-label") || ""));
+      if (!tile) throw new Error(`no tile for cat ${cat} row ${row}`);
+      tile.click();
+      await waitFor(() => gv("state.active") && gv("state.active.row") === row, "clue open");
+      await sleep(120); // let images decode
+    }
+
+    function closeClue() {
+      const skip = $("btn-skip");
+      if (skip && !skip.classList.contains("hidden")) skip.click();
+    }
+
+    /* ============ Scenarios ============ */
+
+    /* ---- P1–P6: the authoring path (editor) ---- */
+
+    async function authoringScenarios() {
+      await bootApp();
+      bigPhotoFile = await loadFixture("fixtures/big-photo.jpg", "big-photo.jpg", "image/jpeg");
+      transparentFile = await loadFixture("fixtures/transparent-logo.png", "transparent-logo.png", "image/png");
+
+      $("btn-editor").click();
+      await waitFor(() => !$("screen-editor").classList.contains("hidden"), "editor open");
+
+      /* P1 — every clue exposes photo controls, plus one for Final. */
+      const clueCount = gv("state.game.categories.reduce((n, c) => n + c.clues.length, 0)");
+      const controls = D().querySelectorAll(".editor-media-control").length;
+      check("P1 editor exposes photo controls for every clue + Final",
+        controls === clueCount * 2 + 1,
+        `${controls} controls for ${clueCount} clues (expected ${clueCount * 2 + 1})`);
+
+      /* P2 — a large real photo embeds: downscaled, JPEG data URI, NOT blank. */
+      const first = D().querySelectorAll(".editor-clue-media")[0];
+      first.open = true;
+      const clueControl = first.querySelectorAll(".editor-media-control")[0];
+      const answerControl = first.querySelectorAll(".editor-media-control")[1];
+      pickFile(clueControl, bigPhotoFile);
+      const thumb = await waitFor(() => {
+        const t = clueControl.querySelector(".editor-media-thumb");
+        return t && t.complete && t.naturalWidth ? t : null;
+      }, "embedded thumbnail", 8000);
+      const embedded = clueControl.querySelector(".editor-media-url").value;
+      const longEdge = Math.max(thumb.naturalWidth, thumb.naturalHeight);
+      check("P2 large photo embeds as a downscaled data:image/jpeg URI",
+        embedded.startsWith("data:image/jpeg;base64,") && longEdge <= W().EditorMedia.MAX_EMBED_DIM && longEdge > 0,
+        `${thumb.naturalWidth}×${thumb.naturalHeight}, ${embedded.length} chars`);
+
+      const px = probePixels(thumb);
+      check("P2b embedded photo is a real image, not a black/blank frame",
+        px.max - px.min > 30 && px.avg > 20,
+        `avg ${px.avg}, range ${px.min}–${px.max}, corner ${px.topLeft.join(",")}`);
+
+      const sizeNote = clueControl.querySelector(".editor-media-size");
+      const meter = $("editor-image-meter").textContent;
+      check("P2c size note + embedded-total meter update",
+        !!sizeNote && /Embedded ~/.test(sizeNote.textContent) && !/~0 B/.test(meter),
+        `${sizeNote ? sizeNote.textContent : "(no note)"} | meter: ${meter}`);
+
+      /* P3 — transparency must flatten to WHITE, never black. */
+      pickFile(answerControl, transparentFile);
+      const alphaThumb = await waitFor(() => {
+        const t = answerControl.querySelector(".editor-media-thumb");
+        return t && t.complete && t.naturalWidth ? t : null;
+      }, "transparent embed", 8000);
+      const alphaPx = probePixels(alphaThumb);
+      check("P3 transparent PNG embeds on white, not black",
+        alphaPx.topLeft[0] > 220 && alphaPx.topLeft[1] > 220 && alphaPx.topLeft[2] > 220,
+        `corner ${alphaPx.topLeft.join(",")}, center ${alphaPx.center.join(",")}`);
+
+      /* P4 — a pasted URL / relative repo path is accepted and previews. */
+      typeInto(answerControl.querySelector(".editor-media-url"), "tests/fixtures/transparent-logo.png");
+      const relThumb = await waitFor(() => {
+        const t = answerControl.querySelector(".editor-media-thumb");
+        return t && t.complete && t.naturalWidth ? t : null;
+      }, "relative-path thumbnail");
+      check("P4 pasted URL / relative path previews in the editor",
+        relThumb.naturalWidth === 800,
+        `${relThumb.naturalWidth}×${relThumb.naturalHeight}`);
+
+      /* P5 — a dangerous reference is refused by the editor AND by validateGame. */
+      const urlInput = clueControl.querySelector(".editor-media-url");
+      const goodRef = urlInput.value;
+      typeInto(urlInput, "javascript:alert(1)");
+      const err = clueControl.querySelector(".editor-media-error");
+      let validateBlocked = false;
+      try {
+        W().validateGame({
+          title: "x",
+          categories: [{ name: "c", clues: [{ value: 200, clue: "q", answer: "a", image: "javascript:alert(1)" }] }],
+        });
+      } catch (e) { validateBlocked = true; }
+      check("P5 javascript: reference is refused by the editor and by validateGame",
+        !!err && validateBlocked,
+        `editor error: ${err ? err.textContent.slice(0, 60) : "(none)"} | validateGame threw: ${validateBlocked}`);
+      typeInto(urlInput, goodRef); // restore for the round-trip check
+      await sleep(60);
+
+      /* P19 — the corrupt-draw detector: catches the "photo turned into black
+         lines" partial rasterisation, without rejecting legitimate photos. */
+      await corruptDrawChecks();
+
+      /* P6 — export round-trips: photos survive, photo-free clues stay clean. */
+      const exported = W().cleanDraft();
+      const json = JSON.stringify(exported);
+      let roundTripped = false;
+      try { W().validateGame(JSON.parse(json)); roundTripped = true; } catch (e) { roundTripped = false; }
+      const c0 = exported.categories[0].clues[0];
+      const c1 = exported.categories[0].clues[1];
+      check("P6 exported JSON keeps photos, drops empty image keys, and re-validates",
+        roundTripped &&
+        typeof c0.image === "string" && c0.image.startsWith("data:image/") &&
+        typeof c0.answerImage === "string" &&
+        !("image" in c1) && !("answerImage" in c1) && !("imageAlt" in c1),
+        `clue1 keys: ${Object.keys(c0).join(",")} | clue2 keys: ${Object.keys(c1).join(",")}`);
+
+      return embedded; // the real embedded photo, reused by the render scenarios
+    }
+
+    /* ---- P19: corrupt-draw detection ---- */
+
+    /**
+     * Paint a canvas in the app realm and hand it to the real classifyDraw.
+     * `paint(ctx, w, h)` runs after the same opaque-white fill the embed does.
+     */
+    function classifyPainted(w, h, paint) {
+      const canvas = D().createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+      paint(ctx, w, h);
+      return W().EditorMedia.classifyDraw(ctx, w, h);
+    }
+
+    async function corruptDrawChecks() {
+      // Path is relative to the APP document (/index.html), not this harness.
+      const photo = await loadImage("tests/fixtures/big-photo.jpg");
+      const W_ = 512;
+      const H_ = 341;
+
+      // A frame that rasterised in bands: real image rows alternating with rows
+      // of pure black — what "the photo turned into a bunch of black lines" is.
+      const striped = classifyPainted(W_, H_, (ctx, w, h) => {
+        ctx.drawImage(photo, 0, 0, w, h);
+        ctx.fillStyle = "#000000";
+        for (let y = 0; y < h; y += 40) ctx.fillRect(0, y, w, 20);
+      });
+      check("P19 a partially-rasterised (black-banded) frame is detected as corrupt",
+        striped === "striped", `classifyDraw → "${striped}"`);
+
+      // Guard rails: the detector must not reject images that are simply dark or
+      // letterboxed, or a normal photo — those would be false rejections.
+      const normal = classifyPainted(W_, H_, (ctx, w, h) => ctx.drawImage(photo, 0, 0, w, h));
+      const letterboxed = classifyPainted(W_, H_, (ctx, w, h) => {
+        ctx.drawImage(photo, 0, 0, w, h);
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, w, 60);          // contiguous bars, not bands
+        ctx.fillRect(0, h - 60, w, 60);
+      });
+      check("P19b a normal photo and a letterboxed photo are NOT rejected",
+        normal === "ok" && letterboxed === "ok",
+        `normal → "${normal}", letterboxed → "${letterboxed}"`);
+
+      // The original uniform no-op draw must still be caught.
+      const blankWhite = classifyPainted(W_, H_, () => {});
+      const blankBlack = classifyPainted(W_, H_, (ctx, w, h) => {
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, w, h);
+      });
+      check("P19c a uniform (all-white or all-black) no-op draw is still caught",
+        blankWhite === "blank" && blankBlack === "blank",
+        `white → "${blankWhite}", black → "${blankBlack}"`);
+    }
+
+    /**
+     * P20 — recovery. Fault-inject the exact failure Cam reported: make the FIRST
+     * drawImage rasterise in black bands (what a device out of memory does), then
+     * behave normally. The embed must recover via the browser-downscaled re-decode
+     * and produce a clean photo — not an error, and not a banded image.
+     */
+    async function recoveryScenario() {
+      await bootApp();
+      $("btn-editor").click();
+      await waitFor(() => !$("screen-editor").classList.contains("hidden"), "editor open");
+      const details = D().querySelectorAll(".editor-clue-media")[0];
+      details.open = true;
+      const control = details.querySelectorAll(".editor-media-control")[0];
+
+      const proto = W().CanvasRenderingContext2D.prototype;
+      const realDraw = proto.drawImage;
+      let draws = 0;
+      proto.drawImage = function patchedDraw() {
+        draws += 1;
+        const out = realDraw.apply(this, arguments);
+        if (draws === 1) {
+          this.save();
+          this.fillStyle = "#000000";
+          for (let y = 0; y < this.canvas.height; y += 40) this.fillRect(0, y, this.canvas.width, 20);
+          this.restore();
+        }
+        return out;
+      };
+
+      let thumb = null;
+      let errorText = "";
+      try {
+        pickFile(control, bigPhotoFile);
+        thumb = await waitFor(() => {
+          const t = control.querySelector(".editor-media-thumb");
+          if (t && t.complete && t.naturalWidth) return t;
+          const e = control.querySelector(".editor-media-error");
+          if (e) { errorText = e.textContent; return "error"; }
+          return null;
+        }, "embed result", 10000);
+      } catch (err) {
+        errorText = err.message;
+      } finally {
+        proto.drawImage = realDraw; // restore BEFORE probing pixels
+      }
+
+      const recovered = thumb && thumb !== "error";
+      // The recovered photo must itself be band-free, judged by the real detector.
+      const verdict = recovered
+        ? classifyPainted(thumb.naturalWidth, thumb.naturalHeight,
+            (ctx, w, h) => ctx.drawImage(thumb, 0, 0, w, h))
+        : "n/a";
+      check("P20 a photo that first rasterises in black bands still embeds cleanly",
+        recovered && verdict === "ok" && draws >= 2,
+        recovered
+          ? `drawImage calls: ${draws}, result ${thumb.naturalWidth}×${thumb.naturalHeight}, verdict "${verdict}"`
+          : `no recovery — error: "${errorText}" after ${draws} draw(s)`);
+    }
+
+    /* ---- P7–P12: the game render path ---- */
+
+    async function renderScenarios(photo) {
+      await bootApp();
+      await loadGameAndStart(testGame(photo));
+
+      /* P7 — a photo clue shows its photo when the clue opens. */
+      await openTile(0, 0);
+      const wrap = $("clue-image");
+      let img = wrap.querySelector("img");
+      check("P7 clue photo renders when the clue is opened",
+        !!img && img.complete && img.naturalWidth > 0 &&
+        !wrap.classList.contains("hidden") &&
+        W().getComputedStyle(wrap).display !== "none",
+        img ? `${img.naturalWidth}×${img.naturalHeight}, alt "${img.alt}"` : "no <img> in #clue-image");
+
+      check("P7b clue photo uses the author's alt text",
+        !!img && img.alt === "Harness clue photo",
+        img ? `alt="${img.alt}"` : "n/a");
+
+      /* P18 — the "can't save" banner must NOT cry wolf when saving works. */
+      const banner = $("save-warning");
+      check("P18 no save warning during a normal photo game",
+        !!banner && banner.classList.contains("hidden") && banner.textContent === "",
+        banner ? `hidden: ${banner.classList.contains("hidden")}, text: "${banner.textContent}"` : "banner element missing");
+
+      /* P8 — the answer photo stays hidden until the answer is revealed. */
+      const ansWrap = $("answer-image");
+      const hiddenBefore = !ansWrap.querySelector("img") &&
+        (ansWrap.classList.contains("hidden") || W().getComputedStyle(ansWrap).display === "none");
+      $("btn-reveal").click();
+      await sleep(200);
+      const ansImg = await waitFor(() => {
+        const n = ansWrap.querySelector("img");
+        return n && n.complete && n.naturalWidth ? n : null;
+      }, "answer image", 4000).catch(() => null);
+      check("P8 answer photo is hidden before the reveal and shown after",
+        hiddenBefore && !!ansImg,
+        `hidden before: ${hiddenBefore}, shown after: ${!!ansImg}`);
+
+      /* P14a — after the reveal, the judging controls are still reachable. */
+      const card = D().querySelector("#clue-modal .modal-card");
+      const judge = $("judge-row");
+      card.scrollTop = card.scrollHeight;
+      await sleep(80);
+      const cardRect = card.getBoundingClientRect();
+      const judgeRect = judge.getBoundingClientRect();
+      check("P14 judging buttons stay reachable with photo + answer photo shown",
+        W().getComputedStyle(card).overflowY === "auto" &&
+        judgeRect.bottom <= cardRect.bottom + 2 && judgeRect.top >= cardRect.top - 2,
+        `card ${Math.round(cardRect.height)}px tall, content ${card.scrollHeight}px, judge row at ${Math.round(judgeRect.top)}–${Math.round(judgeRect.bottom)}`);
+      closeClue();
+      await sleep(80);
+
+      /* P9 — a Daily Double hides the photo until the wager is locked. */
+      await openTile(0, 1);
+      const ddHidden = !$("clue-image").querySelector("img");
+      const ddSplashUp = !$("dd-splash").classList.contains("hidden");
+      typeInto($("dd-wager"), "400");
+      $("btn-dd-go").click();
+      await waitFor(() => gv("state.active.wagerLocked"), "wager locked");
+      await sleep(150);
+      const ddImg = $("clue-image").querySelector("img");
+      check("P9 Daily Double photo appears only after the wager is locked",
+        ddHidden && ddSplashUp && !!ddImg && ddImg.naturalWidth > 0,
+        `hidden during wager: ${ddHidden}, shown after lock: ${!!ddImg}`);
+      closeClue();
+      await sleep(80);
+
+      /* P11 — a broken image degrades to a text note, and play continues. */
+      await openTile(0, 2);
+      await waitFor(() => $("clue-image").querySelector(".clue-image-failed"), "failure note", 6000)
+        .catch(() => null);
+      const note = $("clue-image").querySelector(".clue-image-failed");
+      const stillPlayable = !$("btn-reveal").classList.contains("hidden") &&
+        $("clue-text").textContent === "Broken image clue.";
+      check("P11 an unreachable image shows a text note and the clue stays playable",
+        !!note && !$("clue-image").querySelector("img") && stillPlayable,
+        `note: ${note ? note.textContent : "(none)"} | reveal available: ${stillPlayable}`);
+      closeClue();
+      await sleep(80);
+
+      /* P12 — the phone buzzer protocol never carries image data. */
+      const BP = W().BuzzerProtocol;
+      const fj = gv("state.game.finalJeopardy");
+      const msgs = JSON.stringify([
+        BP.finalWagerMsg(fj.category, 1000, 1000),
+        BP.finalAnswerMsg(fj.category, fj.clue),
+      ]);
+      check("P12 phones never receive image data",
+        !/data:image|"image"|answerImage/.test(msgs),
+        `payload ${msgs.length} chars, no image fields`);
+
+      /* P10 — Final Jeopardy: no photo during wagers, photo with the clue. */
+      W().startFinal();
+      await waitFor(() => gv("state.final && state.final.stage") === "wager", "final wager stage");
+      await sleep(100);
+      const wagerHasImg = !!$("final-body").querySelector("img");
+      D().querySelectorAll(".wager-list input").forEach((i) => typeInto(i, "0"));
+      Array.from($("final-body").querySelectorAll("button"))
+        .find((b) => /Lock wagers/.test(b.textContent)).click();
+      await waitFor(() => gv("state.final.stage") === "clue", "final clue stage");
+      const fjImg = await waitFor(() => {
+        const n = $("final-body").querySelector("img");
+        return n && n.complete && n.naturalWidth ? n : null;
+      }, "final image", 4000).catch(() => null);
+      check("P10 Final Jeopardy photo is hidden during wagers and shown with the clue",
+        !wagerHasImg && !!fjImg,
+        `during wagers: ${wagerHasImg ? "VISIBLE (leak)" : "hidden"}, with clue: ${!!fjImg}`);
+    }
+
+    /* ---- P13: the photo survives a page reload ---- */
+
+    async function persistenceScenario(photo) {
+      await bootApp();
+      await loadGameAndStart(testGame(photo));
+      const before = gv("state.game.categories[0].clues[0].image");
+      const savedLen = (localStorage.getItem("gh-jeopardy-state-v1") || "").length;
+      await bootApp(false); // reload WITHOUT clearing storage — same as F5 mid-game
+      const after = gv("state.game && state.game.categories[0].clues[0].image");
+      const restored = typeof after === "string" && after === before;
+      let renders = false;
+      if (restored && gv("state.phase") === "board") {
+        await openTile(0, 0);
+        const img = $("clue-image").querySelector("img");
+        renders = !!img && img.complete && img.naturalWidth > 0;
+        closeClue();
+      }
+      check("P13 photos survive a page reload (saved game restores and still renders)",
+        restored && renders,
+        `saved state ${savedLen} chars, restored: ${restored}, renders after reload: ${renders}`);
+    }
+
+    /* ---- P15: the "download JSON → commit → play" path ---- */
+
+    async function jsonFileScenario(photo) {
+      await bootApp();
+      const game = testGame(photo);
+      const json = JSON.stringify(game, null, 2);
+      const file = new (W().File)([json], "questions.json", { type: "application/json" });
+      const input = $("json-file-input");
+      const dt = new (W().DataTransfer)();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new (W().Event)("change", { bubbles: true }));
+      await waitFor(() => gv("state.game && state.game.title") === game.title, "uploaded game", 6000);
+      const err = $("setup-error") ? $("setup-error").textContent : "";
+      const nameInput = $("player-name-input");
+      typeInto(nameInput, "Harness");
+      nameInput.form.requestSubmit();
+      $("btn-start").click();
+      await waitFor(() => gv("state.phase") === "board", "board phase");
+      await openTile(0, 0);
+      const img = $("clue-image").querySelector("img");
+      check("P15 a questions.json file with photos loads and renders its photos",
+        !err && !!img && img.complete && img.naturalWidth > 0,
+        `${(json.length / 1024).toFixed(0)} KB file, error: "${err}", image: ${img ? img.naturalWidth + "px" : "none"}`);
+      closeClue();
+    }
+
+    /* ---- P16: the ?game=URL path ---- */
+
+    async function gameUrlScenario() {
+      STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+      await loadFrame("../index.html?game=tests/fixtures/photo-game.json");
+      await waitFor(() => gv("typeof state !== 'undefined' && state.game"), "app boot");
+      W().confirm = () => true;
+      const loaded = gv("state.game && state.game.title");
+      const kind = gv("state.sourceKind");
+      const nameInput = $("player-name-input");
+      typeInto(nameInput, "Harness");
+      nameInput.form.requestSubmit();
+      $("btn-start").click();
+      await waitFor(() => gv("state.phase") === "board", "board phase");
+      await openTile(0, 0);
+      const img = $("clue-image").querySelector("img");
+      check("P16 ?game=URL loads a photo game and renders its photos",
+        kind === "fetch" && !!img && img.complete && img.naturalWidth > 0,
+        `loaded "${loaded}" (${kind}), image: ${img ? img.naturalWidth + "×" + img.naturalHeight : "none"}`);
+      closeClue();
+    }
+
+    /* ---- P17: browser storage full (many big photos) ---- */
+
+    async function quotaScenario(photo) {
+      await bootApp();
+      // Fault injection: refuse any sizeable write, exactly like a phone browser
+      // that has hit its 5 MB localStorage cap with photos already embedded.
+      // NB: patch Storage.prototype — assigning to localStorage.setItem would
+      // just store an ITEM called "setItem" (Storage is a legacy named-property
+      // object), leaving the real method in place.
+      const proto = W().Storage.prototype;
+      const realSet = proto.setItem;
+      let refused = 0;
+      proto.setItem = function (key, value) {
+        if (String(value).length > 20000) {
+          refused += 1;
+          throw new (W().DOMException)("quota exceeded", "QuotaExceededError");
+        }
+        return realSet.call(this, key, value);
+      };
+      await loadGameAndStart(testGame(photo));
+      await openTile(0, 0);
+      const img = $("clue-image").querySelector("img");
+      const playable = !!img && img.complete && img.naturalWidth > 0;
+      // Anything visible that tells the host their game is NOT being saved.
+      const warningText = D().body.innerText;
+      const warned = /could not be saved|not saved|too large|storage/i.test(warningText);
+      check("P17 when browser storage is full the game still plays AND the host is warned",
+        playable && warned && refused > 0,
+        `writes refused: ${refused}, photos still render: ${playable}, visible warning: ${warned}`);
+      closeClue();
+      proto.setItem = realSet;
+    }
+
+    /* ---- P14b: phone-sized viewport ---- */
+
+    async function mobileLayoutScenario(photo) {
+      frame.style.width = "390px";
+      frame.style.height = "780px";
+      await bootApp();
+      await loadGameAndStart(testGame(photo));
+      await openTile(0, 0);
+      $("btn-reveal").click();
+      await sleep(300);
+      const card = D().querySelector("#clue-modal .modal-card");
+      const judge = $("judge-row");
+      card.scrollTop = card.scrollHeight;
+      await sleep(80);
+      const cardRect = card.getBoundingClientRect();
+      const judgeRect = judge.getBoundingClientRect();
+      const img = $("clue-image").querySelector("img");
+      const fits = img && img.getBoundingClientRect().width <= cardRect.width + 1;
+      check("P14b phone-width layout: photo fits the card and judging stays reachable",
+        !!fits && judgeRect.bottom <= cardRect.bottom + 2,
+        `viewport 390×780, image ${img ? Math.round(img.getBoundingClientRect().width) : 0}px wide in a ${Math.round(cardRect.width)}px card, judge bottom ${Math.round(judgeRect.bottom)} vs card bottom ${Math.round(cardRect.bottom)}`);
+      frame.style.width = "1024px";
+      frame.style.height = "700px";
+    }
+
+    /* ============ Run ============ */
+
+    (async function run() {
+      try {
+        await refreshAppAssets();
+        const photo = await authoringScenarios();
+        await recoveryScenario();
+        await renderScenarios(photo);
+        await persistenceScenario(photo);
+        await jsonFileScenario(photo);
+        await gameUrlScenario();
+        await quotaScenario(photo);
+        await mobileLayoutScenario(photo);
+      } catch (err) {
+        check(`harness aborted: ${err && err.message}`, false, err && err.stack ? err.stack.split("\n")[1] : "");
+      }
+      report();
+    })();
+  })();
+  </script>
+</body>
+</html>

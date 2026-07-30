@@ -128,6 +128,20 @@ background (JPEG has no transparency). Very large phone photos or HEIC files
 smaller JPEG/PNG or paste an image URL. iPhone: set the camera to Settings →
 Camera → Formats → **Most Compatible** to shoot JPEGs.
 
+**If a photo comes out as black bands** instead of the picture, the device ran
+out of memory processing it; the app now retries with a browser-side downscale,
+so just add it again. If it still can't, it will say so and you can use a
+smaller copy (a screenshot of the photo works) or paste an image URL.
+
+**If a photo doesn't show up at all:** work down the triage list in
+[docs/photo-clue-verification.md](docs/photo-clue-verification.md) — the usual
+causes are a stale cached page (hard-refresh), a link to the *page* a picture
+sits on rather than the image itself, a host that blocks hotlinking (embed the
+file instead of linking it), or the gold "can't save your game" banner, which
+means browser storage is full of embedded photos and a refresh would lose them.
+That file also defines the 26 success states the feature is checked against;
+run them from `tests/photo-harness.html` over a local server.
+
 > **Tip:** after editing `questions.json`, also update `js/data.js` if you want
 > the same questions when opening `index.html` directly from disk (it's the
 > fallback used when the JSON can't be fetched). On GitHub Pages only
@@ -256,7 +270,7 @@ js/buzzer-host.js        host side: PeerJS load, room lifecycle, buzzer UI
 js/buzzer-wagers.js      host side: phone Daily-Double + Final wagers & answers
 js/buzzer-player.js      player side: phone join, buzzer, wager & answer screens
 questions.json           the questions GitHub Pages serves — edit this one
-tests/                   node:test unit tests + in-browser loopback harness
+tests/                   node:test unit tests + in-browser harnesses (buzzer, photo clues)
 ```
 
 The buzzer feature loads PeerJS lazily from a pinned, SRI-verified cdnjs URL

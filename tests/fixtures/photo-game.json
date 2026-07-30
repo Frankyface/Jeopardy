@@ -1,0 +1,30 @@
+{
+  "title": "Photo harness game (fetched)",
+  "categories": [
+    {
+      "name": "Photos",
+      "clues": [
+        {
+          "value": 200,
+          "clue": "Regular photo clue.",
+          "answer": "Answer 1",
+          "image": "tests/fixtures/big-photo.jpg",
+          "imageAlt": "Harness clue photo",
+          "answerImage": "tests/fixtures/transparent-logo.png"
+        },
+        {
+          "value": 400,
+          "clue": "No photo here.",
+          "answer": "Answer 2"
+        }
+      ]
+    }
+  ],
+  "finalJeopardy": {
+    "category": "Final Photos",
+    "clue": "Final photo clue.",
+    "answer": "Final answer",
+    "image": "tests/fixtures/big-photo.jpg",
+    "imageAlt": "Harness final photo"
+  }
+}
