@@ -77,51 +77,95 @@
 
   const HEIC_RE = /\.(heic|heif)$/i;
 
+  // Shown only after the browser-downscaled retry has also failed.
+  const STRIPED_MESSAGE =
+    "That photo came out corrupted — black bands instead of the picture — because this device ran out of " +
+    "memory processing it. Try a smaller copy of the photo (screenshot it, or email it to yourself at a " +
+    "smaller size), or paste an image URL instead.";
+  const BLANK_MESSAGE =
+    "That image came out blank — it may be too large for this device to process. Try a different or smaller " +
+    "photo, or paste an image URL instead.";
+
   /** iPhone HEIC/HEIF, which most browsers can't decode. @returns {boolean} */
   function looksHeic(file) {
     const type = (file && file.type) || "";
     return type === "image/heic" || type === "image/heif" || (!!file && HEIC_RE.test(file.name || ""));
   }
 
+  /* ---- Corrupt-draw detection (spec §10.4) ----
+     A browser that runs out of memory rasterising a big photo does NOT throw —
+     it hands back a canvas that only partly contains the image. Two shapes of
+     that failure show up in the wild and BOTH must be caught, because either
+     one otherwise gets silently embedded and played in front of a room:
+       "blank"   — the draw was a total no-op, leaving one uniform colour (the
+                   white fill, or an all-black corrupted frame).
+       "striped" — the draw landed in bands, leaving pure-black rows alternating
+                   with real image rows: the "photo turned into black lines"
+                   report. This one has plenty of pixel-to-pixel variation, so a
+                   uniformity test alone waves it straight through. */
+
+  const BLACK_LEVEL = 8;            // ≤ this on every channel counts as pure black
+  const MIN_STRIPE_ROWS = 16;       // too short to judge banding below this
+  const MIN_STRIPE_SHARE = 0.12;    // ≥12% of rows fully black
+  const MIN_STRIPE_BANDS = 6;       // ≥6 black↔image switches down the image
+
   /**
-   * True when the drawn canvas is a single uniform color — the signature of a
-   * `drawImage` that silently did nothing (mobile Safari's out-of-memory
-   * failure on a large photo, which otherwise embeds a blank frame). Because
-   * drawImage always covers the whole canvas when it succeeds, the only way the
-   * result is perfectly uniform is a no-op draw, which leaves either the white
-   * fill (white readback) OR a corrupted all-black frame — this catches both.
-   * ANY real image varies pixel-to-pixel, so a small logo/subject on white is
-   * NOT a false positive; only a genuinely solid-color (degenerate) image is
-   * rejected, and the host is better off re-choosing it. Full scan with an
-   * early exit on the first varying pixel (instant for real images). One
-   * `getImageData` — can throw on a tainted canvas (never here, same-origin
-   * file/bitmap) so we fail safe to false.
-   * @returns {boolean}
+   * Classify a drawn canvas as "ok", "blank", or "striped". The canvas was
+   * pre-filled opaque white, so a *pure*-black full-width row cannot come from
+   * the fill — a real photo's dark areas survive JPEG decode and downscaling as
+   * near-black-with-noise, not as exact zeros across a whole row. Contiguous
+   * black bars (letterboxing, a dark border) give only a couple of black↔image
+   * switches, so they stay "ok"; a partly rasterised frame alternates many
+   * times. One `getImageData`, which can throw on a tainted canvas (never here —
+   * same-origin file/bitmap), so it fails safe to "ok".
+   * @returns {"ok"|"blank"|"striped"}
    */
-  function isBlankDraw(ctx, w, h) {
+  function classifyDraw(ctx, w, h) {
+    let data;
     try {
-      const data = ctx.getImageData(0, 0, w, h).data;
-      if (data.length < 8) return false; // 1px canvas — nothing to compare
-      const r0 = data[0];
-      const g0 = data[1];
-      const b0 = data[2];
-      for (let i = 4; i < data.length; i += 4) {
-        if (Math.abs(data[i] - r0) > 4 || Math.abs(data[i + 1] - g0) > 4 || Math.abs(data[i + 2] - b0) > 4) {
-          return false; // real pixel-to-pixel variation → a genuine image
-        }
-      }
-      return true; // perfectly uniform → drawImage was a no-op
+      data = ctx.getImageData(0, 0, w, h).data;
     } catch (err) {
-      return false;
+      return "ok";
     }
+    if (data.length < 8) return "ok"; // 1px canvas — nothing to compare
+    const r0 = data[0];
+    const g0 = data[1];
+    const b0 = data[2];
+    let uniform = true;
+    let blackRows = 0;
+    let bands = 0;
+    let prevBlack = null;
+    for (let y = 0; y < h; y += 1) {
+      const base = y * w * 4;
+      let rowBlack = true;
+      for (let x = 0; x < w; x += 1) {
+        const i = base + x * 4;
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        if (r > BLACK_LEVEL || g > BLACK_LEVEL || b > BLACK_LEVEL) rowBlack = false;
+        if (Math.abs(r - r0) > 4 || Math.abs(g - g0) > 4 || Math.abs(b - b0) > 4) uniform = false;
+        // Both verdicts for this row are settled and neither can flip back.
+        if (!rowBlack && !uniform) break;
+      }
+      if (rowBlack) blackRows += 1;
+      if (prevBlack !== null && prevBlack !== rowBlack) bands += 1;
+      prevBlack = rowBlack;
+    }
+    if (uniform) return "blank"; // drawImage was a total no-op
+    if (h >= MIN_STRIPE_ROWS && bands >= MIN_STRIPE_BANDS && blackRows / h >= MIN_STRIPE_SHARE) {
+      return "striped";
+    }
+    return "ok";
   }
 
   /**
    * Draw a decoded source (ImageBitmap or <img>) downscaled onto a canvas and
-   * return a JPEG data URI — or null if the draw came back blank. Paints an
+   * return a JPEG data URI, or a reason the draw came back unusable. Paints an
    * OPAQUE WHITE background FIRST: JPEG has no alpha, so without it every
    * transparent pixel (a PNG cut-out, a logo) would encode as BLACK — the core
-   * "just shows black photos" bug. @returns {string|null}
+   * "just shows black photos" bug.
+   * @returns {{dataUrl: string|null, reason: "blank"|"striped"|null}}
    */
   function encodeToJpeg(source, srcW, srcH) {
     const scale = Math.min(1, MAX_EMBED_DIM / (Math.max(srcW, srcH) || 1));
@@ -135,8 +179,9 @@
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, w, h);
     ctx.drawImage(source, 0, 0, w, h);
-    if (isBlankDraw(ctx, w, h)) return null;
-    return canvas.toDataURL("image/jpeg", EMBED_QUALITY);
+    const verdict = classifyDraw(ctx, w, h);
+    if (verdict !== "ok") return { dataUrl: null, reason: verdict };
+    return { dataUrl: canvas.toDataURL("image/jpeg", EMBED_QUALITY), reason: null };
   }
 
   /**
@@ -161,10 +206,17 @@
       fail("Please choose an image file.");
       return;
     }
-    const finish = (source, w, h, close) => {
-      let dataUrl = null;
+    const failFor = (reason) => fail(reason === "striped" ? STRIPED_MESSAGE : BLANK_MESSAGE);
+
+    /**
+     * Encode one decoded source. `onBadDraw(reason, w, h)` — when given — takes
+     * over on an unusable frame instead of reporting it, so the caller can try a
+     * cheaper decode before giving up.
+     */
+    const finish = (source, w, h, close, onBadDraw) => {
+      let result = null;
       try {
-        dataUrl = encodeToJpeg(source, w, h);
+        result = encodeToJpeg(source, w, h);
       } catch (err) {
         if (typeof console !== "undefined") console.warn("Image embed failed:", err);
         if (close) close();
@@ -172,28 +224,48 @@
         return;
       }
       if (close) close();
-      if (dataUrl === null) {
-        fail("That image came out blank — it may be too large for this device to process. Try a different or smaller photo, or paste an image URL instead.");
+      if (result.reason) {
+        if (onBadDraw) onBadDraw(result.reason, w, h);
+        else failFor(result.reason);
         return;
       }
-      onDone(dataUrl);
+      onDone(result.dataUrl);
     };
+
+    const decodeBitmap = (extra) => {
+      const options = { imageOrientation: "from-image" };
+      for (const key in extra) options[key] = extra[key];
+      // A synchronous throw from an engine that dislikes the options dict.
+      try { return createImageBitmap(file, options); } catch (err) { return null; }
+    };
+
+    /**
+     * The first draw came back blank or banded: this device could not rasterise a
+     * full-resolution bitmap of the photo. Decode it again asking the BROWSER to
+     * downscale during decode, so the bitmap handed back is already small and
+     * never needs the memory that failed. Only worth it when the photo is bigger
+     * than the cap — resizing up would just blur it — and only once.
+     */
+    const retrySmaller = (reason, w, h) => {
+      if (Math.max(w, h) <= MAX_EMBED_DIM) { failFor(reason); return; }
+      const box = w >= h ? { resizeWidth: MAX_EMBED_DIM } : { resizeHeight: MAX_EMBED_DIM };
+      box.resizeQuality = "high";
+      const retry = decodeBitmap(box);
+      if (!retry) { failFor(reason); return; }
+      retry.then(
+        (small) => finish(small, small.width, small.height, () => { if (small.close) small.close(); }, null),
+        () => failFor(reason)
+      );
+    };
+
     // Two-arg then(onFulfilled, onRejected): the reject handler fires ONLY when
     // createImageBitmap itself rejects — NOT when finish()/onDone throws — so a
     // downstream throw (e.g. a localStorage quota error in the save-draft step)
-    // can't re-trigger the fallback and fire the callbacks twice. The try/catch
-    // guards a synchronous throw from an engine that dislikes the options dict.
-    let bitmapPromise = null;
-    if (typeof createImageBitmap === "function") {
-      try {
-        bitmapPromise = createImageBitmap(file, { imageOrientation: "from-image" });
-      } catch (err) {
-        bitmapPromise = null;
-      }
-    }
+    // can't re-trigger the fallback and fire the callbacks twice.
+    const bitmapPromise = typeof createImageBitmap === "function" ? decodeBitmap({}) : null;
     if (bitmapPromise) {
       bitmapPromise.then(
-        (bmp) => finish(bmp, bmp.width, bmp.height, () => { if (bmp.close) bmp.close(); }),
+        (bmp) => finish(bmp, bmp.width, bmp.height, () => { if (bmp.close) bmp.close(); }, retrySmaller),
         () => decodeViaImageElement(file, finish, fail)
       );
       return;
@@ -370,6 +442,7 @@
     estimateRefBytes,
     totalEmbeddedBytes,
     formatBytes,
+    classifyDraw,
     downscaleImageFile,
     buildImageControl,
     renderMeter,
