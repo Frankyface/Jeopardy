@@ -700,6 +700,64 @@ phone Final wagers, typed Final answers (and the manual fallback/override for
 players without phones), and that Final Jeopardy can only be played once per
 game.
 
+## 12. Answer timers (red-block countdown)
+
+Added 2026-08-12. TV-podium style countdown bars: a strip of 9 red blocks that
+extinguish pairwise from the ends (9 → 7 → 5 → 3 → 1 → 0 over five equal
+stages), flashing at zero. **A timer is a cue only** — it never scores, closes,
+locks, disarms, or advances anything, in keeping with the locked
+"host drives everything" rule (§1, §8.2). The host's buttons work identically
+with the timer running, expired, or off.
+
+### 12.1 Settings (start screen)
+
+Two number fields on the setup screen, persisted in app state
+(`state.settings`, spec §6.3 pattern) and normalised on restore:
+
+- `clueTimerSeconds` (default 10) — the per-question answer clock.
+- `finalTimerSeconds` (default 30) — the Final Jeopardy clock.
+- Legal range 0–300 (`TimerCore.normalizeSeconds`); **0 = that timer is off**.
+
+### 12.2 When each clock runs
+
+- **Regular clue:** starts when a buzz WINS (host arrival order, §5) — never on
+  clue open, never while reading, never in games without a winning buzz. Stops
+  on: the winner judged ✗ (a later winning buzz restarts it fresh), answer
+  revealed, or clue closed.
+- **Daily Double:** starts when the wager locks (manual or phone, §8.1), i.e.
+  the moment the clue is revealed to the answering player. Same stops.
+- **Final Jeopardy:** starts when the clue stage begins (wagers locked), stops
+  when the host reveals the answer (judge stage) or leaves Final. Never runs in
+  the wager stage — nothing about wagers is timed.
+
+### 12.3 Protocol additions (backward compatible)
+
+- `buzzer` messages MAY carry `timerSeconds` (int 1–300) on `won`/`taken`
+  modes only; the buzz/join **events** carry it into the reducer, and the join
+  path sends the REMAINING clock so a rejoining phone doesn't get a fresh one.
+- Rejoin syncs also carry `timerTotalSeconds` (the countdown's ORIGINAL
+  length, ≥ `timerSeconds`) so the phone's bar resumes at the true stage
+  instead of lighting a fresh full strip. Omitted when equal to the remaining
+  clock (a fresh start); illegal without a legal `timerSeconds`.
+- `final` stage `"answer"` MAY carry both fields (remaining + total, same
+  rules).
+- `answerRevealed` re-broadcasts won/taken syncs **without** a clock — screens
+  stay up for judging, but every phone's bar stops the moment the answer is
+  out (the §12.2 stop, implemented for phones too).
+- A junk `timerSeconds`/`timerTotalSeconds` drops the FIELD, never the message
+  (same tolerance as the `locked` reason, §5). Old phones/hosts ignore both.
+
+### 12.4 Files
+
+- `js/timer-core.js` — pure UMD core (`litBlocks`, `normalizeSeconds`), unit
+  tested in `tests/timer-core.test.mjs` (TM-C*) with protocol additions in
+  `tests/buzzer-protocol.test.mjs` (TM-P*).
+- `js/timer.js` — `window.GameTimer` DOM glue owning four fixed slots/bars:
+  host clue modal, host Final modal, phone buzzer screen, phone Final answer
+  screen. Ephemeral module state; never serialised; every caller
+  optional-chains so the game runs unchanged if it fails to load.
+- `css/timer.css` — block strip + `timer-done` flash (reduced-motion aware).
+
 ---
 
 # Part B — Verification plan & success states

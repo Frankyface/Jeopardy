@@ -299,6 +299,11 @@ const BuzzerHost = (function () {
   function handleJoin(conn, name) {
     const newPlayerId = genPlayerId();
     const roster = (appState()?.players || []).map((p) => ({ id: p.id, name: p.name }));
+    // A phone (re)joining mid-buzz gets the REMAINING clock plus its original
+    // length (spec §12.3), so its bar resumes at the true stage instead of
+    // lighting a fresh full strip; the reducer only attaches either to a
+    // won/taken sync.
+    const remaining = window.GameTimer ? window.GameTimer.remaining("clue") : 0;
     const result = window.BuzzerProtocol.roomReduce(roomState, {
       type: "join",
       peerId: conn.peer,
@@ -306,6 +311,8 @@ const BuzzerHost = (function () {
       roster,
       maxPlayers: maxPlayers(),
       newPlayerId,
+      timerSeconds: remaining > 0 ? remaining : undefined,
+      timerTotalSeconds: remaining > 0 ? window.GameTimer.total("clue") : undefined,
     });
     roomState = result.next;
     applyEffects(result.effects, { newPlayerId });
@@ -317,14 +324,25 @@ const BuzzerHost = (function () {
 
   function handleBuzz(peerId) {
     const hadWinner = roomState.winnerId;
-    const result = window.BuzzerProtocol.roomReduce(roomState, { type: "buzz", peerId });
+    // Stamp the configured answer clock onto the event (spec §12) so a winning
+    // buzz carries it to every phone; the reducer ignores it on non-wins.
+    const timerSeconds = clueTimerSeconds();
+    const result = window.BuzzerProtocol.roomReduce(roomState, { type: "buzz", peerId, timerSeconds });
     roomState = result.next;
     applyEffects(result.effects);
     if (!hadWinner && roomState.winnerId === peerId) {
       playBeep();
       vibrateHost();
+      if (timerSeconds) window.GameTimer?.start("clue", timerSeconds);
     }
     renderAll();
+  }
+
+  /** Configured per-question answer clock; 0/absent (off) → undefined (§12). */
+  function clueTimerSeconds() {
+    // Already normalised at every write path (app.js clampTimerSeconds); the
+    // protocol re-validates before anything reaches a phone.
+    return appState()?.settings?.clueTimerSeconds || undefined;
   }
 
   function handleClose(peerId) {
@@ -459,7 +477,11 @@ const BuzzerHost = (function () {
     dispatch({ type: "answerRevealed" });
   }
   function onClueClosed() { dispatch({ type: "clueReset" }); }
-  function onJudgedWrong(playerId) { dispatch({ type: "judgedWrong", playerId }); }
+  function onJudgedWrong(playerId) {
+    // The wrong answerer is off the clock; the next winning buzz restarts it.
+    window.GameTimer?.stop("clue");
+    dispatch({ type: "judgedWrong", playerId });
+  }
 
   /* ============ Sound + haptics ============ */
 

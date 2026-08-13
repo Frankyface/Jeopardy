@@ -13,6 +13,9 @@ answers live in a single JSON file you can edit.
   click any score to fix it manually
 - **Daily Doubles** — mark any clue with `"dailyDouble": true` for a wager round
 - **Final Jeopardy** — optional final round with per-player wagers
+- **Answer timers** — TV-style red-block countdowns (set the lengths on the
+  start screen, or 0 to turn them off); purely a visual cue — you still judge
+  with the buttons
 - **Saves your game** — state is kept in `localStorage`, so a refresh won't lose
   scores or the board
 - **Works offline too** — open `index.html` straight from disk and it falls back
@@ -173,6 +176,27 @@ Two more ways to use custom questions:
 Scoring follows house rules, not TV rules — e.g. players at $0 or less can
 still play Final Jeopardy (with a $0 wager).
 
+### Answer timers
+
+The start screen has two timer settings under **Timers** (saved with your
+game; set either to **0 to turn it off**):
+
+- **Answer timer** — a strip of red blocks, straight off the TV podium, counts
+  down once someone is *on the spot*: the moment a phone player **wins the
+  buzz** (buzzer rooms), or the moment a **Daily Double wager locks**. It does
+  not run while you read the clue, and regular clues without a buzzer room
+  aren't timed.
+- **Final Jeopardy** — the same blocks under the Final clue while players
+  write; wagering is never timed.
+
+Blocks go dark in pairs from the outside in and the strip flashes at zero —
+and that's all it does. **The timer never scores, closes, or locks anything**;
+you still rule with ✓ / ✗ at your own pace, so a slow answer can still earn
+the points if you allow it. Phones show a matching bar: the buzzed-in player
+(and everyone watching them) during a clue, and every phone during Final
+Jeopardy. A phone that reconnects mid-countdown picks up the remaining time,
+not a fresh clock.
+
 ## Buzzer rooms (optional)
 
 Turn phones into real buzzers. It's completely optional — if you never open a
@@ -262,9 +286,12 @@ battery dies mid-Final).
 index.html               page structure
 css/styles.css           all styling
 css/buzzer.css           buzzer host panel + player phone screen styles
+css/timer.css            answer-timer red blocks + settings styles
 js/app.js                game logic (vanilla JS, no dependencies)
 js/editor.js             in-page question editor
 js/data.js               built-in sample game (offline fallback)
+js/timer-core.js         pure countdown math (block stages, settings bounds)
+js/timer.js              answer-timer bars (host modals + phone screens)
 js/buzzer-protocol.js    pure buzzer core (room codes, validation, reducers)
 js/buzzer-host.js        host side: PeerJS load, room lifecycle, buzzer UI
 js/buzzer-wagers.js      host side: phone Daily-Double + Final wagers & answers

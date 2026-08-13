@@ -37,6 +37,10 @@
   // Smallest legal wager, matching the manual UI's MIN_WAGER (app.js). DD wagers
   // are bounded MIN_WAGER..max; Final wagers 0..max.
   const MIN_WAGER = 5;
+  // Answer-timer cap (spec §12) — matches TimerCore.MAX_SECONDS, restated here so
+  // the protocol stays dependency-free. Timers are a display cue only: a junk
+  // timerSeconds drops the FIELD, never the message.
+  const TIMER_SECONDS_MAX = 300;
   // C0 controls + DEL + C1 controls. Built from escapes so the source stays
   // pure printable ASCII (no literal control bytes in the file).
   const CONTROL_CHARS = new RegExp("[\\u0000-\\u001F\\u007F-\\u009F]", "g");
@@ -61,13 +65,15 @@
    * @typedef {{v:1, t:"final-answer", text:string}} FinalAnswerMsg
    * @typedef {{v:1, t:"joined", playerName:string}} JoinedMsg
    * @typedef {{v:1, t:"reject", reason:"name-taken"|"room-full"|"bad-name"}} RejectMsg
-   * @typedef {{v:1, t:"buzzer", mode:BuzzerMode, by?:string, reason?:LockReason}} BuzzerMsg
+   * @typedef {{v:1, t:"buzzer", mode:BuzzerMode, by?:string, reason?:LockReason,
+   *            timerSeconds?:number, timerTotalSeconds?:number}} BuzzerMsg
    * @typedef {{v:1, t:"dd-wager-request", category:string, clueValue:number,
    *            score:number, min:number, max:number}} DdWagerRequestMsg
    * @typedef {{v:1, t:"dd-wager-accepted", amount:number}} DdWagerAcceptedMsg
    * @typedef {{v:1, t:"dd-cancel"}} DdCancelMsg
    * @typedef {{v:1, t:"final", stage:"wager", category:string, score:number, max:number}} FinalWagerStageMsg
-   * @typedef {{v:1, t:"final", stage:"answer", category:string, clue:string}} FinalAnswerStageMsg
+   * @typedef {{v:1, t:"final", stage:"answer", category:string, clue:string,
+   *            timerSeconds?:number, timerTotalSeconds?:number}} FinalAnswerStageMsg
    * @typedef {{v:1, t:"final", stage:"waiting"}} FinalWaitingStageMsg
    * @typedef {FinalWagerStageMsg|FinalAnswerStageMsg|FinalWaitingStageMsg} FinalMsg
    * @typedef {{v:1, t:"final-result", correct:boolean, delta:number, score:number}} FinalResultMsg
@@ -102,8 +108,8 @@
    *
    * @typedef {{type:"join", peerId:string, name:string,
    *            roster:Array<{id:string,name:string}>, maxPlayers:number,
-   *            newPlayerId:string}} JoinEvent
-   * @typedef {{type:"buzz", peerId:string}} BuzzEvent
+   *            newPlayerId:string, timerSeconds?:number, timerTotalSeconds?:number}} JoinEvent
+   * @typedef {{type:"buzz", peerId:string, timerSeconds?:number}} BuzzEvent
    * @typedef {{type:"arm"}} ArmEvent
    * @typedef {{type:"disarm"}} DisarmEvent
    * @typedef {{type:"judgedWrong", playerId:string}} JudgedWrongEvent
@@ -121,7 +127,8 @@
    *            "final-waiting"|"final-result",
    *            mode:BuzzerMode, by:string|null, lockReason:LockReason|null,
    *            playerName:string|null, notice:string|null, prompt:PlayerPrompt|null,
-   *            result:PlayerResult|null}} PlayerUiState
+   *            result:PlayerResult|null, timerSeconds:number|null,
+   *            timerTotalSeconds:number|null}} PlayerUiState
    */
 
   /* ============ Room code + name helpers ============ */
@@ -303,7 +310,16 @@
     }
     // stage === "answer"
     if (typeof m.clue !== "string" || m.clue.length > HOST_TEXT_MAX) return null;
-    return { v: 1, t: "final", stage: "answer", category: m.category, clue: m.clue };
+    /** @type {FinalAnswerStageMsg} */
+    const out = { v: 1, t: "final", stage: "answer", category: m.category, clue: m.clue };
+    if (isLegalTimerSeconds(m.timerSeconds)) out.timerSeconds = /** @type {number} */ (m.timerSeconds);
+    attachTimerTotal(out, m.timerTotalSeconds);
+    return out;
+  }
+
+  /** Display-cue bound: a positive integer up to the cap (spec §12). */
+  function isLegalTimerSeconds(value) {
+    return Number.isInteger(value) && value >= 1 && value <= TIMER_SECONDS_MAX;
   }
 
   /**
@@ -321,7 +337,26 @@
     if (typeof m.reason === "string" && LOCK_REASONS.has(m.reason)) {
       out.reason = /** @type {LockReason} */ (m.reason);
     }
+    // Same junk tolerance for the answer clock (spec §12): drop the field only.
+    if (isLegalTimerSeconds(m.timerSeconds)) out.timerSeconds = /** @type {number} */ (m.timerSeconds);
+    attachTimerTotal(out, m.timerTotalSeconds);
     return out;
+  }
+
+  /**
+   * Attach an original-duration field (rejoin syncs, spec §12.3) — legal only
+   * alongside a legal remaining clock it is at least as long as.
+   * @param {{timerSeconds?:number, timerTotalSeconds?:number}} out
+   * @param {unknown} total
+   */
+  function attachTimerTotal(out, total) {
+    if (
+      out.timerSeconds !== undefined &&
+      isLegalTimerSeconds(total) &&
+      /** @type {number} */ (total) >= out.timerSeconds
+    ) {
+      out.timerTotalSeconds = /** @type {number} */ (total);
+    }
   }
 
   /* ============ Message + effect builders ============ */
@@ -332,11 +367,20 @@
   }
 
   /** @returns {BuzzerMsg} */
-  function buzzerMsg(mode, by, reason) {
+  function buzzerMsg(mode, by, reason, timerSeconds, timerTotalSeconds) {
     /** @type {BuzzerMsg} */
     const msg = { v: 1, t: "buzzer", mode };
     if (by) msg.by = by;
     if (reason) msg.reason = reason;
+    // The answer clock rides only on the modes where someone is on it (spec §12).
+    // A distinct original duration rides along on rejoin syncs; when it equals
+    // the remaining clock (a fresh start) it is omitted as redundant.
+    if ((mode === "won" || mode === "taken") && isLegalTimerSeconds(timerSeconds)) {
+      msg.timerSeconds = timerSeconds;
+      if (isLegalTimerSeconds(timerTotalSeconds) && timerTotalSeconds > timerSeconds) {
+        msg.timerTotalSeconds = timerTotalSeconds;
+      }
+    }
     return msg;
   }
 
@@ -359,8 +403,16 @@
     return { v: 1, t: "final", stage: "wager", category, score, max };
   }
   /** @returns {FinalAnswerStageMsg} */
-  function finalAnswerMsg(category, clue) {
-    return { v: 1, t: "final", stage: "answer", category, clue };
+  function finalAnswerMsg(category, clue, timerSeconds, timerTotalSeconds) {
+    /** @type {FinalAnswerStageMsg} */
+    const msg = { v: 1, t: "final", stage: "answer", category, clue };
+    if (isLegalTimerSeconds(timerSeconds)) {
+      msg.timerSeconds = timerSeconds;
+      if (isLegalTimerSeconds(timerTotalSeconds) && timerTotalSeconds > timerSeconds) {
+        msg.timerTotalSeconds = timerTotalSeconds;
+      }
+    }
+    return msg;
   }
   /** @returns {FinalWaitingStageMsg} */
   function finalWaitingMsg() {
@@ -463,18 +515,22 @@
       (r) => r && typeof r.name === "string" && r.name.toLowerCase() === lower
     );
 
-    if (match) return acceptJoin(state, event.peerId, match.name, match.id, "linkPlayer");
+    if (match) return acceptJoin(state, event, match.name, match.id, "linkPlayer");
     if (roster.length >= event.maxPlayers) return reject(state, event.peerId, "room-full");
-    return acceptJoin(state, event.peerId, cleaned, event.newPlayerId, "addPlayer");
+    return acceptJoin(state, event, cleaned, event.newPlayerId, "addPlayer");
   }
 
   /**
    * Add/relink a connection, then emit joined + the roster instruction + an
-   * initial buzzer-state sync for the joining peer.
+   * initial buzzer-state sync for the joining peer. The join event's optional
+   * timerSeconds (the REMAINING answer clock, spec §12) rides on that sync —
+   * buzzerMsg only attaches it when the synced mode is won/taken.
    * @param {RoomState} state
+   * @param {JoinEvent} event
    * @param {"addPlayer"|"linkPlayer"} rosterKey
    */
-  function acceptJoin(state, peerId, displayName, playerId, rosterKey) {
+  function acceptJoin(state, event, displayName, playerId, rosterKey) {
+    const peerId = event.peerId;
     // Drop any stale room entries for the same scoreboard player (reconnect),
     // and hand a retained winner slot over to the fresh connection.
     /** @type {Record<string, RoomPlayer>} */
@@ -497,7 +553,8 @@
       effects: [
         send(peerId, { v: 1, t: "joined", playerName: displayName }),
         rosterEffect,
-        send(peerId, buzzerMsg(modeForPeer(next, peerId), winnerName(next))),
+        send(peerId, buzzerMsg(modeForPeer(next, peerId), winnerName(next), null,
+          event.timerSeconds, event.timerTotalSeconds)),
       ],
     };
   }
@@ -536,11 +593,13 @@
    */
   function winBuzz(state, event, peer) {
     const next = { ...state, winnerId: event.peerId };
+    // The host glue stamps the answer clock onto the buzz event (spec §12); it
+    // rides to the winner AND the watching phones so every screen can tick.
     /** @type {Effect[]} */
-    const effects = [send(event.peerId, buzzerMsg("won"))];
+    const effects = [send(event.peerId, buzzerMsg("won", null, null, event.timerSeconds))];
     for (const id of connectedPeers(next)) {
       if (id !== event.peerId && !next.lockedOut[id]) {
-        effects.push(send(id, buzzerMsg("taken", peer.name)));
+        effects.push(send(id, buzzerMsg("taken", peer.name, null, event.timerSeconds)));
       }
     }
     return { next, effects };
@@ -619,13 +678,14 @@
   }
 
   /**
-   * Answer revealed with nobody buzzed: the buzzable window ends. Phones go idle
-   * (reading false, not armed). A held winner (mid-judge) keeps their screen.
+   * Answer revealed: the buzzable window ends. With nobody buzzed, phones go
+   * idle. A held winner (mid-judge) keeps their won/taken screens — but the
+   * re-broadcast still matters: it carries NO timerSeconds, so every phone's
+   * answer clock stops the moment the answer is out (spec §12.2).
    * @param {RoomState} state
    */
   function reduceAnswerRevealed(state) {
     const next = { ...state, armed: false, reading: false };
-    if (state.winnerId) return { next, effects: [] };
     return { next, effects: broadcastModes(next) };
   }
 
@@ -655,7 +715,7 @@
   function createPlayerUiState() {
     return {
       screen: "join", mode: "idle", by: null, lockReason: null, playerName: null,
-      notice: null, prompt: null, result: null,
+      notice: null, prompt: null, result: null, timerSeconds: null, timerTotalSeconds: null,
     };
   }
 
@@ -676,24 +736,31 @@
   function playerReduce(ui, rawMsg) {
     const msg = validateMessage(rawMsg);
     if (!msg) return ui;
+    // ONE clock-clearing site (spec §12): every screen-changing message drops a
+    // ticking clock unless it explicitly carries one. Only `input-rejected`
+    // (same form, no screen change) and ignorable messages keep the old clock.
+    const wiped = { ...ui, timerSeconds: null, timerTotalSeconds: null };
     switch (msg.t) {
       case "joined":
         return {
-          ...ui, screen: "buzzer", mode: "idle", by: null, lockReason: null,
+          ...wiped, screen: "buzzer", mode: "idle", by: null, lockReason: null,
           playerName: msg.playerName, notice: null, prompt: null, result: null,
         };
       case "reject":
-        return { ...ui, screen: "join", notice: rejectNotice(msg.reason) };
+        return { ...wiped, screen: "join", notice: rejectNotice(msg.reason) };
       case "buzzer":
         // A live buzzer update clears any lingering "wager locked" beat. The lock
-        // reason (early vs wrong) rides along so the phone shows the right label.
+        // reason (early vs wrong) rides along so the phone shows the right label,
+        // and the answer clock (spec §12) only survives on won/taken screens.
         return {
-          ...ui, screen: "buzzer", mode: msg.mode, by: msg.by ?? null,
+          ...wiped, screen: "buzzer", mode: msg.mode, by: msg.by ?? null,
           lockReason: msg.reason ?? null, prompt: null, notice: null,
+          timerSeconds: msg.timerSeconds ?? null,
+          timerTotalSeconds: msg.timerTotalSeconds ?? null,
         };
       case "dd-wager-request":
         return {
-          ...ui, screen: "dd-wager", notice: null, result: null,
+          ...wiped, screen: "dd-wager", notice: null, result: null,
           prompt: {
             category: msg.category, clueValue: msg.clueValue,
             score: msg.score, min: msg.min, max: msg.max,
@@ -701,27 +768,27 @@
         };
       case "dd-wager-accepted":
         return {
-          ...ui, screen: "buzzer", prompt: null, result: null,
+          ...wiped, screen: "buzzer", prompt: null, result: null,
           notice: "Wager locked — look up!",
         };
       case "dd-cancel":
-        return { ...ui, screen: "buzzer", prompt: null, result: null, notice: null };
+        return { ...wiped, screen: "buzzer", prompt: null, result: null, notice: null };
       case "final":
-        return reduceFinalStage(ui, msg);
+        return reduceFinalStage(wiped, msg);
       case "final-result":
         return {
-          ...ui, screen: "final-result", prompt: null, notice: null,
+          ...wiped, screen: "final-result", prompt: null, notice: null,
           result: { correct: msg.correct, delta: msg.delta, score: msg.score },
         };
       case "final-cancel":
-        return { ...ui, screen: "buzzer", prompt: null, result: null, notice: null };
+        return { ...wiped, screen: "buzzer", prompt: null, result: null, notice: null };
       case "input-rejected":
         // Stay on the current form; surface the host's reason so the phone
-        // re-shows the field with the error (spec §5).
+        // re-shows the field with the error (spec §5). Clock untouched.
         return { ...ui, notice: msg.reason };
       case "room-closed":
         return {
-          ...ui, screen: "join", mode: "idle", by: null, lockReason: null,
+          ...wiped, screen: "join", mode: "idle", by: null, lockReason: null,
           notice: "The host closed the room.", prompt: null, result: null,
         };
       default:
@@ -730,25 +797,29 @@
   }
 
   /**
-   * Fold a host `final` stage message into the phone UI.
-   * @param {PlayerUiState} ui
+   * Fold a host `final` stage message into the phone UI. `wiped` is the
+   * playerReduce base with the clock already cleared; the answer stage is the
+   * one Final screen that can carry a clock of its own.
+   * @param {PlayerUiState} wiped
    * @param {FinalMsg} msg
    * @returns {PlayerUiState}
    */
-  function reduceFinalStage(ui, msg) {
+  function reduceFinalStage(wiped, msg) {
     if (msg.stage === "wager") {
       return {
-        ...ui, screen: "final-wager", notice: null, result: null,
+        ...wiped, screen: "final-wager", notice: null, result: null,
         prompt: { category: msg.category, score: msg.score, min: 0, max: msg.max },
       };
     }
     if (msg.stage === "answer") {
       return {
-        ...ui, screen: "final-answer", notice: null, result: null,
+        ...wiped, screen: "final-answer", notice: null, result: null,
         prompt: { category: msg.category, clue: msg.clue },
+        timerSeconds: msg.timerSeconds ?? null,
+        timerTotalSeconds: msg.timerTotalSeconds ?? null,
       };
     }
-    return { ...ui, screen: "final-waiting", notice: null, prompt: null };
+    return { ...wiped, screen: "final-waiting", notice: null, prompt: null };
   }
 
   return {

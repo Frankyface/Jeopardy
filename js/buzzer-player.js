@@ -209,6 +209,10 @@
       connecting = false;
       connLive = true;
       everConnected = true;
+      // Any pre-drop clock is stale — the host's rejoin sync brings the true
+      // remaining time. Without this, the render below would briefly restart
+      // a FULL countdown from the old ui (spec §12.3).
+      ui = { ...ui, timerSeconds: null, timerTotalSeconds: null };
       failCount = 0; // a clean connection resets the failure guidance (§9.4)
       clearTimeout(joinDeadline);
       joinDeadline = null;
@@ -508,6 +512,27 @@
     else if (view === "wager") renderWager();
     else if (view === "answer") renderAnswer();
     else renderMessage();
+    syncPhoneTimers(view);
+  }
+
+  /**
+   * Keep the phone's answer-clock bars in step with the reduced UI (spec §12).
+   * Declarative via GameTimer.sync: an unchanged key never resets a ticking
+   * clock, so re-renders (notices, reconnect dots) don't restart the countdown.
+   * Distinct buzz-holds always pass through idle/armed in between, which nulls
+   * the key and re-arms a fresh start.
+   */
+  function syncPhoneTimers(view) {
+    const GT = window.GameTimer;
+    if (!GT) return;
+    const secs = ui.timerSeconds;
+    const total = ui.timerTotalSeconds; // rejoin syncs carry the original length
+    const onClock = ui.mode === "won" || ui.mode === "taken";
+    const buzzKey =
+      view === "buzzer" && connLive && onClock && secs ? `${ui.mode}:${secs}` : null;
+    GT.sync("phoneBuzz", buzzKey, secs, total);
+    const answerKey = view === "answer" && connLive && secs ? `answer:${secs}` : null;
+    GT.sync("phoneAnswer", answerKey, secs, total);
   }
 
   /** Map the reduced screen + live-connection flag onto one visible container. */

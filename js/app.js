@@ -13,6 +13,10 @@ const MAX_PLAYERS = 8;
 const MAX_CATEGORIES = 8;
 const MAX_CLUES_PER_CATEGORY = 8;
 const MIN_WAGER = 5;
+// Answer-timer defaults (spec §12): the clue clock runs once someone is on the
+// spot (a winning buzz, or a locked Daily-Double wager); the Final clock runs
+// while the Final clue is up. 0 = that timer is off. Cue only — never scores.
+const DEFAULT_TIMER_SETTINGS = { clueTimerSeconds: 10, finalTimerSeconds: 30 };
 
 /** @type {{
  *  phase: 'setup'|'board'|'final',
@@ -27,7 +31,8 @@ const MIN_WAGER = 5;
  *  final: null|{stage:'wager'|'clue'|'judge'|'standings', wagers:Record<string,number>,
  *               answers:Record<string,string>, judged:Record<string,boolean>},
  *  finalPlayed: boolean,
- *  buzzer: {roomCode: string|null}
+ *  buzzer: {roomCode: string|null},
+ *  settings: {clueTimerSeconds: number, finalTimerSeconds: number}
  * }} */
 let state = freshState();
 
@@ -46,6 +51,25 @@ function freshState() {
     final: null,
     finalPlayed: false,
     buzzer: { roomCode: null },
+    settings: { ...DEFAULT_TIMER_SETTINGS },
+  };
+}
+
+/** Clamp one timer-length setting to legal whole seconds, `fallback` on junk.
+    Prefers the shared TimerCore rule; the local clamp keeps a SAVED value
+    intact (instead of discarding it) if timer-core.js ever fails to load. */
+function clampTimerSeconds(value, fallback) {
+  if (window.TimerCore) return window.TimerCore.normalizeSeconds(value, fallback);
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.round(value), 0), 300);
+}
+
+/** Normalise a (possibly saved/junk) settings slice back to legal values. */
+function normalizeSettings(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  return {
+    clueTimerSeconds: clampTimerSeconds(src.clueTimerSeconds, DEFAULT_TIMER_SETTINGS.clueTimerSeconds),
+    finalTimerSeconds: clampTimerSeconds(src.finalTimerSeconds, DEFAULT_TIMER_SETTINGS.finalTimerSeconds),
   };
 }
 
@@ -102,6 +126,7 @@ function loadSavedState() {
       }
     }
     if (typeof restored.finalPlayed !== "boolean") restored.finalPlayed = false;
+    restored.settings = normalizeSettings(saved.settings); // tolerate old saves (§12)
     return restored;
   } catch (err) {
     console.warn("Ignoring corrupt saved state:", err);
@@ -266,6 +291,7 @@ function render() {
 function renderSetup() {
   $("setup-title").textContent = state.game?.title || "Jeopardy!";
   $("source-note").textContent = `Questions: ${state.source}`;
+  renderTimerSettings();
 
   const list = $("player-list");
   list.replaceChildren();
@@ -287,6 +313,30 @@ function renderSetup() {
 
 function setSetupError(msg) {
   $("setup-error").textContent = msg || "";
+}
+
+/* ============ Timer settings (spec §12) ============ */
+
+function renderTimerSettings() {
+  reflectTimerInput("timer-clue-seconds", state.settings.clueTimerSeconds);
+  reflectTimerInput("timer-final-seconds", state.settings.finalTimerSeconds);
+}
+
+/** Push state into an input unless the host is mid-typing in it. */
+function reflectTimerInput(id, value) {
+  const input = $(id);
+  if (input && document.activeElement !== input) input.value = String(value);
+}
+
+function wireTimerSetting(id, key) {
+  const input = $(id);
+  if (!input) return;
+  input.addEventListener("change", () => {
+    const parsed = Number.parseFloat(input.value);
+    const value = clampTimerSeconds(parsed, state.settings[key]);
+    input.value = String(value); // snap junk/out-of-range typing back to legal
+    setState({ settings: { ...state.settings, [key]: value } });
+  });
 }
 
 function addPlayer(name) {
@@ -352,6 +402,7 @@ function newGame() {
     sourceUrl: state.sourceUrl,
     players: state.players.map((p) => ({ ...p, score: 0 })),
     buzzer: state.buzzer,
+    settings: state.settings,
   };
   saveState();
   render();
@@ -500,6 +551,11 @@ function renderClueModal() {
   const modal = $("clue-modal");
   const active = state.active;
   show(modal, !!active);
+  // Declarative kill for the clue clock (§12): any state where no one can be
+  // on it — clue closed, answer revealed, or a wholesale reset (New Game,
+  // editor "Use in game") — stops it right here, whatever path led in. Starts
+  // stay imperative (a winning buzz lives in buzzer module state, not here).
+  if (!active || active.revealed) window.GameTimer?.stop("clue");
   if (!active) return;
 
   const clue = activeClue();
@@ -580,6 +636,9 @@ function lockDailyDoubleWager() {
       `Enter a wager between ${formatMoney(MIN_WAGER)} and ${formatMoney(max)}.`;
     return;
   }
+  // The answering player is now on the clock (spec §12) — started before the
+  // setState render so the phone-final broadcast pattern stays consistent.
+  window.GameTimer?.start("clue", state.settings.clueTimerSeconds);
   setState({
     active: { ...state.active, wagerLocked: true, wager, wagerPlayerId: playerId },
   });
@@ -587,6 +646,8 @@ function lockDailyDoubleWager() {
 }
 
 function revealAnswer() {
+  // renderClueModal's declarative stop kills the clue clock on this render (§12);
+  // onAnswerRevealed re-syncs phones without one so their bars stop too.
   setState({ active: { ...state.active, revealed: true } });
   window.BuzzerHost?.onAnswerRevealed?.();
 }
@@ -689,6 +750,9 @@ function finalMaxWager(player) {
 function renderFinalModal() {
   const modal = $("final-modal");
   show(modal, !!state.final);
+  // The Final clock only lives on the clue stage; any other stage (or leaving
+  // Final entirely) declaratively kills it (§12). Idempotent, safe every render.
+  if (!state.final || state.final.stage !== "clue") window.GameTimer?.stop("final");
   if (!state.final) return;
 
   const body = $("final-body");
@@ -767,6 +831,9 @@ function lockFinalWagers() {
     }
     wagers[playerId] = value;
   }
+  // Start the Final clock BEFORE the setState render: the render broadcasts the
+  // answer stage to phones, which reads the remaining clock off this timer (§12).
+  window.GameTimer?.start("final", state.settings.finalTimerSeconds);
   setState({ final: { ...state.final, stage: "clue", wagers } });
 }
 
@@ -901,6 +968,9 @@ function wireStaticEvents() {
     event.target.value = "";
   });
 
+  wireTimerSetting("timer-clue-seconds", "clueTimerSeconds");
+  wireTimerSetting("timer-final-seconds", "finalTimerSeconds");
+
   $("btn-start").addEventListener("click", startGame);
   $("btn-new-game").addEventListener("click", newGame);
   $("btn-final").addEventListener("click", startFinal);
@@ -951,6 +1021,7 @@ async function init() {
       source: savedMatchesParam ? saved.source : "loading…",
       sourceKind: savedMatchesParam ? saved.sourceKind : "default",
       sourceUrl: savedMatchesParam ? saved.sourceUrl : null,
+      settings: saved.settings, // already normalised — a refresh must not reset timers
     };
   }
   render();

@@ -1,0 +1,112 @@
+/* ============================================================
+   Jeopardy — answer-timer red blocks (spec §12)
+   TV-podium style: a centred strip of 9 red blocks that go dark
+   pairwise from the ends. `timer-done` flashes the strip at zero
+   — a cue only, nothing about the game changes.
+   ============================================================ */
+
+/* Podium red is deliberately hotter than the UI's --red (wrong-answer pink);
+   tokens keep the lit/off/flash states in lockstep. */
+:root {
+  --timer-lit: linear-gradient(180deg, #ff5148 0%, #d81f14 100%);
+  --timer-lit-glow: 0 0 10px rgba(255, 70, 50, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  --timer-off-bg: #131735;
+  --timer-off-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.65);
+}
+
+.timer-bar {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin: 14px auto 0;
+  max-width: 520px;
+  width: 100%;
+}
+
+.timer-block {
+  flex: 1 1 0;
+  max-width: 48px;
+  height: 16px;
+  border-radius: 3px;
+  background: var(--timer-lit);
+  box-shadow: var(--timer-lit-glow);
+  transition: background var(--duration, 180ms) ease,
+              box-shadow var(--duration, 180ms) ease;
+}
+
+.timer-block.off {
+  background: var(--timer-off-bg);
+  box-shadow: var(--timer-off-shadow);
+}
+
+/* Time's up: flash the whole strip a few times, then rest dark. Cue only. */
+.timer-bar.timer-done .timer-block {
+  animation: timer-flash 0.35s ease-in-out 4;
+}
+
+@keyframes timer-flash {
+  0%, 100% {
+    background: var(--timer-off-bg);
+    box-shadow: var(--timer-off-shadow);
+  }
+  50% {
+    background: var(--timer-lit);
+    box-shadow: 0 0 14px rgba(255, 70, 50, 0.8);
+  }
+}
+
+/* Phone bars sit under the giant buzz button / answer box — full width, chunkier. */
+.timer-bar-phone {
+  max-width: 420px;
+  gap: 5px;
+  margin-top: 16px;
+}
+
+.timer-bar-phone .timer-block {
+  height: 20px;
+  max-width: 44px;
+}
+
+/* ============ Setup-screen timer settings ============ */
+
+.timer-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+}
+
+.timer-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+/* Same recipe as .add-player-form input (styles.css) — the fields sit side by
+   side on the setup screen and must read as one family. */
+.timer-field input {
+  width: 5.5em;
+  padding: 0.45em 0.6em;
+  font: inherit;
+  color: var(--ink);
+  background: rgba(1, 1, 23, 0.6);
+  border: 1px solid rgba(170, 176, 224, 0.35);
+  border-radius: var(--radius);
+}
+
+.timer-field input:focus-visible {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 204, 77, 0.25);
+}
+
+.timer-hint {
+  margin: 10px 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timer-bar.timer-done .timer-block { animation: none; }
+}

@@ -172,6 +172,7 @@ function useDraftInGame() {
     source: "question editor",
     sourceKind: "upload",
     players: state.players.map((p) => ({ ...p, score: 0 })),
+    settings: state.settings, // a mid-session reset must not revert timers (§12)
   });
   closeEditor();
 }

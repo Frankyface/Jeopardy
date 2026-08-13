@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="css/styles.css">
   <link rel="stylesheet" href="css/buzzer.css">
   <link rel="stylesheet" href="css/media.css">
+  <link rel="stylesheet" href="css/timer.css">
 </head>
 <body>
 
@@ -54,6 +55,23 @@
           <p class="buzzer-join-note">Playing on your phone?
             <a class="buzzer-join-link" href="?room=">Join a buzzer room</a>
             with the host&rsquo;s code.</p>
+        </div>
+
+        <div class="setup-section">
+          <h3 class="setup-heading">Timers</h3>
+          <div class="timer-settings">
+            <label class="timer-field" for="timer-clue-seconds">Answer timer (seconds)
+              <input id="timer-clue-seconds" type="number" min="0" max="300" step="1"
+                     inputmode="numeric" autocomplete="off">
+            </label>
+            <label class="timer-field" for="timer-final-seconds">Final Jeopardy (seconds)
+              <input id="timer-final-seconds" type="number" min="0" max="300" step="1"
+                     inputmode="numeric" autocomplete="off">
+            </label>
+          </div>
+          <p class="timer-hint">Counts down once a player buzzes in (and after a Daily
+            Double wager locks). It&rsquo;s a cue only &mdash; you still judge with the
+            buttons. Set 0 for no timer.</p>
         </div>
 
         <div class="setup-section">
@@ -174,6 +192,9 @@
       <!-- Host buzz bar (regular clues only); filled by buzzer-host.js -->
       <div id="buzzer-clue-bar" class="buzzer-clue-bar hidden"></div>
 
+      <!-- Answer-timer red blocks (spec §12); driven by js/timer.js. Cue only. -->
+      <div id="clue-timer" class="timer-bar hidden" aria-hidden="true"></div>
+
       <div class="clue-actions">
         <button id="btn-reveal" class="btn btn-gold btn-big hidden" type="button">Reveal Answer</button>
         <div id="judge-row" class="judge-row hidden"></div>
@@ -187,6 +208,9 @@
     <div class="modal-card final-card">
       <h2 id="final-heading" class="final-heading"></h2>
       <div id="final-body" class="final-body"></div>
+      <!-- Final Jeopardy timer blocks (spec §12); outside #final-body so
+           re-renders of the body never reset a ticking clock. -->
+      <div id="final-timer" class="timer-bar hidden" aria-hidden="true"></div>
     </div>
   </div>
 
@@ -211,6 +235,8 @@
         <span id="player-head-name" class="player-head-name"></span>
       </header>
       <button id="player-buzz" class="player-buzz-btn mode-idle" type="button" disabled></button>
+      <!-- Phone answer clock (spec §12): ticks while you (or a rival) hold the buzz. -->
+      <div id="player-timer" class="timer-bar timer-bar-phone hidden" aria-hidden="true"></div>
       <p id="player-buzz-note" class="player-buzz-note"></p>
       <footer class="player-foot">
         <button id="player-leave" class="btn btn-ghost btn-small" type="button">Leave room</button>
@@ -237,6 +263,8 @@
         <input id="player-answer-input" type="text" maxlength="120" autocomplete="off" spellcheck="false">
       </label>
       <p id="player-answer-note" class="player-form-note"></p>
+      <!-- Final Jeopardy phone clock (spec §12). Cue only — answers stay open. -->
+      <div id="player-answer-timer" class="timer-bar timer-bar-phone hidden" aria-hidden="true"></div>
       <button id="player-answer-submit" class="btn btn-gold btn-big" type="button">Submit answer</button>
     </div>
 
@@ -249,6 +277,8 @@
 
   <script src="js/data.js"></script>
   <script src="js/media.js"></script>
+  <script src="js/timer-core.js"></script>
+  <script src="js/timer.js"></script>
   <script src="js/buzzer-protocol.js"></script>
   <script src="js/buzzer-net.js"></script>
   <script src="js/buzzer-player.js"></script>

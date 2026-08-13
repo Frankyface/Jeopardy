@@ -258,7 +258,10 @@ const BuzzerWagers = (function () {
       resetFinalTracking();
       broadcastFinal((peerId, playerId) => finalWagerFor(peerId, playerId));
     } else if (to === "clue") {
-      broadcastFinal((peerId) => send(peerId, finalAnswerPayload()));
+      // Build ONCE: remaining() ceils wall-clock per call, so a per-phone
+      // rebuild straddling a second boundary would hand phones different clocks.
+      const payload = finalAnswerPayload();
+      broadcastFinal((peerId) => send(peerId, payload));
     } else if (to === "judge") {
       snapshotScores();
       broadcastFinal((peerId) => send(peerId, BP.finalWaitingMsg()));
@@ -281,7 +284,13 @@ const BuzzerWagers = (function () {
 
   function finalAnswerPayload() {
     const fj = appState().game.finalJeopardy;
-    return BP.finalAnswerMsg(fj.category, fj.clue);
+    // Remaining host clock (spec §12): effectively full at stage entry (app.js
+    // starts it just before the broadcast render), partial for a mid-stage
+    // rejoin, absent once expired or when the Final timer is off. The original
+    // length rides along so a rejoined bar resumes at the true stage (§12.3).
+    const remaining = window.GameTimer ? window.GameTimer.remaining("final") : 0;
+    if (remaining <= 0) return BP.finalAnswerMsg(fj.category, fj.clue);
+    return BP.finalAnswerMsg(fj.category, fj.clue, remaining, window.GameTimer.total("final"));
   }
 
   /** Run `fn(peerId, playerId)` for every connected+linked phone. */

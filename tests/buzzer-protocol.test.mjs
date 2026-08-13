@@ -1,7 +1,8 @@
 /* ============================================================
    Unit tests for the pure buzzer protocol core (spec Part B, U1–U18).
    Zero npm deps: node:test + node:assert only.
-   Run from the project root:  node --test tests/
+   Run from the project root:  node --test
+   (bare — Node 24 rejects a `tests/` directory positional)
    ============================================================ */
 
 import test from "node:test";
@@ -766,4 +767,95 @@ test("broker controller: backoff schedule, cap, lost after max, recover resets (
   scheduled = null;
   ctrl2.onDisconnected();
   assert.equal(scheduled, null);
+});
+
+/* ============ TM-P — answer-timer protocol additions (spec §12) ============ */
+
+test("TM-P1 validateMessage buzzer: legal timerSeconds kept, junk dropped not fatal", () => {
+  assert.deepEqual(
+    BP.validateMessage({ v: 1, t: "buzzer", mode: "won", timerSeconds: 10 }),
+    { v: 1, t: "buzzer", mode: "won", timerSeconds: 10 }
+  );
+  assert.deepEqual(
+    BP.validateMessage({ v: 1, t: "buzzer", mode: "taken", by: "Rita", timerSeconds: 30 }),
+    { v: 1, t: "buzzer", mode: "taken", by: "Rita", timerSeconds: 30 }
+  );
+  // Junk timerSeconds: the FIELD is dropped, the message survives (forward-compatible).
+  for (const junk of ["10", 0, -3, 1.5, 9_999, NaN, null, {}, []]) {
+    const out = BP.validateMessage({ v: 1, t: "buzzer", mode: "won", timerSeconds: junk });
+    assert.deepEqual(out, { v: 1, t: "buzzer", mode: "won" }, `junk=${String(junk)}`);
+  }
+});
+
+test("TM-P2 validateMessage final answer stage: optional timerSeconds, junk dropped", () => {
+  assert.deepEqual(
+    BP.validateMessage({ v: 1, t: "final", stage: "answer", category: "C", clue: "Q", timerSeconds: 30 }),
+    { v: 1, t: "final", stage: "answer", category: "C", clue: "Q", timerSeconds: 30 }
+  );
+  const out = BP.validateMessage({
+    v: 1, t: "final", stage: "answer", category: "C", clue: "Q", timerSeconds: "30",
+  });
+  assert.deepEqual(out, { v: 1, t: "final", stage: "answer", category: "C", clue: "Q" });
+  // Wager stage never carries a timer — field silently dropped.
+  const wager = BP.validateMessage({
+    v: 1, t: "final", stage: "wager", category: "C", score: 0, max: 0, timerSeconds: 30,
+  });
+  assert.equal(wager.timerSeconds, undefined);
+});
+
+test("TM-P3 buzz event carries timerSeconds into won + taken messages", () => {
+  const state = deepFreeze(roomWith({
+    A: peer("Rita", "p1"), B: peer("Sam", "p2"), C: peer("Ola", "p3", false),
+  }, { armed: true }));
+  const { next, effects } = BP.roomReduce(state, { type: "buzz", peerId: "A", timerSeconds: 12 });
+  assert.equal(next.winnerId, "A");
+  const won = sendsTo(effects, "A")[0].msg;
+  assert.deepEqual(won, { v: 1, t: "buzzer", mode: "won", timerSeconds: 12 });
+  const taken = sendsTo(effects, "B")[0].msg;
+  assert.equal(taken.mode, "taken");
+  assert.equal(taken.timerSeconds, 12);
+  assert.equal(sendsTo(effects, "C").length, 0); // disconnected peer gets nothing
+
+  // Without the field (timer off), no timerSeconds anywhere.
+  const bare = BP.roomReduce(roomWith({ A: peer("Rita", "p1") }, { armed: true }),
+    { type: "buzz", peerId: "A" });
+  assert.deepEqual(sendsTo(bare.effects, "A")[0].msg, { v: 1, t: "buzzer", mode: "won" });
+});
+
+test("TM-P4 join mid-buzz: initial sync carries remaining timerSeconds only when won/taken", () => {
+  // A phone (re)joining while someone holds the buzz sees taken + the remaining clock.
+  const state = roomWith({ A: peer("Rita", "p1") }, { winnerId: "A" });
+  const { effects } = BP.roomReduce(state, {
+    type: "join", peerId: "B", name: "Sam", roster: [], maxPlayers: 8,
+    newPlayerId: "np1", timerSeconds: 7,
+  });
+  const sync = sendsTo(effects, "B").find((e) => e.msg.t === "buzzer").msg;
+  assert.equal(sync.mode, "taken");
+  assert.equal(sync.timerSeconds, 7);
+
+  // Joining an idle room: the same event field must NOT leak into the sync.
+  const idle = BP.roomReduce(BP.createRoomState(), {
+    type: "join", peerId: "B", name: "Sam", roster: [], maxPlayers: 8,
+    newPlayerId: "np2", timerSeconds: 7,
+  });
+  const idleSync = sendsTo(idle.effects, "B").find((e) => e.msg.t === "buzzer").msg;
+  assert.equal(idleSync.mode, "idle");
+  assert.equal(idleSync.timerSeconds, undefined);
+});
+
+test("TM-P5 playerReduce: timerSeconds tracks won/taken and final answer, clears elsewhere", () => {
+  let ui = BP.createPlayerUiState();
+  assert.equal(ui.timerSeconds, null);
+  ui = BP.playerReduce(ui, { v: 1, t: "joined", playerName: "Rita" });
+  ui = BP.playerReduce(ui, { v: 1, t: "buzzer", mode: "won", timerSeconds: 10 });
+  assert.equal(ui.timerSeconds, 10);
+  ui = BP.playerReduce(ui, { v: 1, t: "buzzer", mode: "armed" });
+  assert.equal(ui.timerSeconds, null); // re-arm clears the clock
+  ui = BP.playerReduce(ui, { v: 1, t: "buzzer", mode: "taken", by: "Sam", timerSeconds: 8 });
+  assert.equal(ui.timerSeconds, 8);
+  ui = BP.playerReduce(ui, { v: 1, t: "final", stage: "answer", category: "C", clue: "Q", timerSeconds: 30 });
+  assert.equal(ui.timerSeconds, 30);
+  assert.equal(ui.screen, "final-answer");
+  ui = BP.playerReduce(ui, { v: 1, t: "final", stage: "waiting" });
+  assert.equal(ui.timerSeconds, null); // pencils down — clock gone
 });
